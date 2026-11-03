@@ -1,0 +1,12 @@
+{
+  "event": "subscription.create",
+  "data": {
+    "id": 501122,
+    "domain": "test",
+    "status": "active",
+    "subscription_code": "SUB_xxxxxxxxxxxx1",
+    "amount": 50000,
+    "plan": {"plan_code": "PLN_xxxxxxxxxxxx1", "name": "Monthly"},
+    "customer": {"customer_code": "CUS_xxxxxxxxxxxxxx1", "email": "ada@example.com"}
+  }
+}

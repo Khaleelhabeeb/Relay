@@ -1,0 +1,47 @@
+{
+  "event": "charge.success",
+  "data": {
+    "id": 4099260516,
+    "domain": "test",
+    "status": "success",
+    "reference": "APPA_01JBQ7Z3K9X2",
+    "amount": 500000,
+    "message": null,
+    "gateway_response": "Successful",
+    "paid_at": "2026-11-02T10:15:42.000Z",
+    "created_at": "2026-11-02T10:15:20.000Z",
+    "channel": "card",
+    "currency": "NGN",
+    "ip_address": "203.0.113.10",
+    "metadata": {
+      "student_id": "STU-0042",
+      "term": "2026-T1"
+    },
+    "fees": 7500,
+    "customer": {
+      "id": 180001,
+      "first_name": "Ada",
+      "last_name": "Example",
+      "email": "ada@example.com",
+      "customer_code": "CUS_xxxxxxxxxxxxxx1",
+      "phone": null,
+      "metadata": null,
+      "risk_action": "default"
+    },
+    "authorization": {
+      "authorization_code": "AUTH_xxxxxxxxx1",
+      "bin": "408408",
+      "last4": "4081",
+      "exp_month": "12",
+      "exp_year": "2030",
+      "channel": "card",
+      "card_type": "visa ",
+      "bank": "TEST BANK",
+      "country_code": "NG",
+      "brand": "visa",
+      "reusable": true,
+      "signature": "SIG_xxxxxxxxxxxx1"
+    },
+    "plan": {}
+  }
+}

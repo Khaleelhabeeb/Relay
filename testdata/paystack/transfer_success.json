@@ -1,0 +1,18 @@
+{
+  "event": "transfer.success",
+  "data": {
+    "id": 81020301,
+    "domain": "test",
+    "status": "success",
+    "reference": "APPA_PAYOUT_0001",
+    "amount": 100000,
+    "currency": "NGN",
+    "source": "balance",
+    "reason": "Vendor payout",
+    "transfer_code": "TRF_xxxxxxxxxxxx1",
+    "recipient": {
+      "recipient_code": "RCP_xxxxxxxxxxxx1",
+      "type": "nuban"
+    }
+  }
+}

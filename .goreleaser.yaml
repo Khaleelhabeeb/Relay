@@ -1,0 +1,38 @@
+# Release binaries and checksums for tagged versions (vX.Y.Z).
+# The container image is built by .github/workflows/release.yml.
+version: 2
+
+project_name: relay
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: relay
+    main: ./cmd/relay
+    binary: relay
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/khaleelhabeeb/relay/internal/cli.Version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+      - examples/relay.yaml
+      - examples/.env.example
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true   # CHANGELOG.md is maintained by hand

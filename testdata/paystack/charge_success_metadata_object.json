@@ -1,0 +1,37 @@
+{
+  "event": "charge.success",
+  "data": {
+    "id": 4099260777,
+    "domain": "test",
+    "status": "success",
+    "reference": "T893401827364551",
+    "amount": 1250000,
+    "gateway_response": "Successful",
+    "paid_at": "2026-11-02T11:02:09.000Z",
+    "created_at": "2026-11-02T11:01:51.000Z",
+    "channel": "card",
+    "currency": "NGN",
+    "metadata": {
+      "application": "app_b",
+      "invoice_id": "INV-7781",
+      "custom_fields": [
+        {"display_name": "Matric No", "variable_name": "matric_no", "value": "UNI/2026/0193"}
+      ]
+    },
+    "fees": 18750,
+    "customer": {
+      "id": 180002,
+      "email": "bayo@example.com",
+      "customer_code": "CUS_xxxxxxxxxxxxxx2"
+    },
+    "authorization": {
+      "authorization_code": "AUTH_xxxxxxxxx2",
+      "channel": "card",
+      "card_type": "mastercard",
+      "bank": "TEST BANK",
+      "country_code": "NG",
+      "brand": "mastercard",
+      "reusable": true
+    }
+  }
+}

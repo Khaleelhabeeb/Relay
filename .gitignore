@@ -1,0 +1,14 @@
+/bin/
+/dist/
+*.db
+*.db-wal
+*.db-shm
+*.db.lock
+.env
+.env.*
+!.env.example
+coverage.out
+
+docs
+system-design.md
+.claude

@@ -1,0 +1,8 @@
+.git
+bin
+dist
+*.db
+*.db-*
+*.db.lock
+.env
+.env.*

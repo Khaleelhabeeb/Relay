@@ -1,0 +1,37 @@
+# Demo: Relay plus two receiving applications.
+#
+#   cp examples/.env.example examples/.env   # fill in secrets
+#   docker compose -f examples/docker-compose.yml --env-file examples/.env up --build
+#   examples/send-fixture.sh testdata/paystack/charge_success_checkout.json
+services:
+  relay:
+    build: ..
+    env_file: .env
+    ports:
+      - "127.0.0.1:8080:8080"   # webhooks (put HTTPS in front in production)
+      - "127.0.0.1:8081:8081"   # registration API + metrics (keep private)
+    volumes:
+      - ./relay.compose.yaml:/etc/relay/relay.yaml:ro
+      - relay-data:/var/lib/relay
+    restart: unless-stopped
+
+  app_a:
+    image: python:3.13-slim
+    command: ["python", "-u", "/app/receiver.py"]
+    environment:
+      NAME: app_a
+      RELAY_SIGNING_SECRET: ${APP_A_RELAY_SIGNING_SECRET}
+    volumes:
+      - ./receiver/receiver.py:/app/receiver.py:ro
+
+  app-b:
+    image: python:3.13-slim
+    command: ["python", "-u", "/app/receiver.py"]
+    environment:
+      NAME: app_b
+      RELAY_SIGNING_SECRET: ${APP_B_RELAY_SIGNING_SECRET}
+    volumes:
+      - ./receiver/receiver.py:/app/receiver.py:ro
+
+volumes:
+  relay-data:

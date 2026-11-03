@@ -1,0 +1,40 @@
+# Configuration for examples/docker-compose.yml. The receivers live on the
+# compose network (private addresses), so this demo enables
+# allow_insecure_local. Never enable it in production.
+version: 1
+
+server:
+  listen: ":8080"
+  api_listen: ":8081"
+  metrics: true
+
+storage:
+  dsn: /var/lib/relay/relay.db
+
+providers:
+  paystack:
+    secret_env: PAYSTACK_SECRET_KEY
+
+applications:
+  app_a:
+    endpoint: "http://app_a:8000/webhooks/relay"
+    signing_secret_env: APP_A_RELAY_SIGNING_SECRET
+    registration_token_env: APP_A_RELAY_API_TOKEN
+    payload_format: original
+  app_b:
+    endpoint: "http://app-b:8000/webhooks/relay"
+    signing_secret_env: APP_B_RELAY_SIGNING_SECRET
+    registration_token_env: APP_B_RELAY_API_TOKEN
+    payload_format: envelope
+
+routes:
+  - application: app_a
+    match:
+      reference_prefix: "APPA_"
+  - application: app_b
+    match:
+      metadata:
+        application: "app_b"
+
+delivery:
+  allow_insecure_local: true

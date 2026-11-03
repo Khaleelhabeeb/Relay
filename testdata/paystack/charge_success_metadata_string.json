@@ -1,0 +1,29 @@
+{
+  "event": "charge.success",
+  "data": {
+    "id": 4099261003,
+    "domain": "test",
+    "status": "success",
+    "reference": "T112233445566778",
+    "amount": 300000,
+    "gateway_response": "Approved",
+    "paid_at": "2026-11-02T11:30:00.000Z",
+    "created_at": "2026-11-02T11:29:41.000Z",
+    "channel": "bank",
+    "currency": "NGN",
+    "metadata": "{\"application\":\"app_b\",\"invoice_id\":\"INV-7790\"}",
+    "fees": 4500,
+    "customer": {
+      "id": 180003,
+      "email": "chi@example.com",
+      "customer_code": "CUS_xxxxxxxxxxxxxx3"
+    },
+    "authorization": {
+      "authorization_code": "AUTH_xxxxxxxxx3",
+      "channel": "bank",
+      "bank": "TEST BANK",
+      "country_code": "NG",
+      "reusable": false
+    }
+  }
+}

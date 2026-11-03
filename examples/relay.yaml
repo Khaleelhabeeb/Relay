@@ -1,0 +1,42 @@
+# Example Relay configuration. Secrets come from the environment variables
+# named by the *_env fields; see examples/.env.example.
+version: 1
+
+server:
+  listen: ":8080"
+  public_base_url: "https://relay.example.com"
+  max_body_bytes: 1048576
+
+storage:
+  driver: sqlite
+  dsn: "./relay.db"
+
+providers:
+  paystack:
+    secret_env: PAYSTACK_SECRET_KEY
+
+applications:
+  app_a:
+    endpoint: "https://app-a.example.com/webhooks/relay"
+    signing_secret_env: APP_A_RELAY_SIGNING_SECRET
+    registration_token_env: APP_A_RELAY_API_TOKEN
+    payload_format: original
+  app_b:
+    endpoint: "https://app-b.example.com/webhooks/relay"
+    signing_secret_env: APP_B_RELAY_SIGNING_SECRET
+    registration_token_env: APP_B_RELAY_API_TOKEN
+    payload_format: envelope
+
+routes:
+  - application: app_a
+    match:
+      reference_prefix: "APPA_"
+  - application: app_b
+    match:
+      metadata:
+        application: "app_b"
+
+delivery:
+  max_attempts: 10
+  timeout_seconds: 10
+  worker_count: 8
