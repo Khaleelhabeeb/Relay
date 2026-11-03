@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/khaleelhabeeb/relay/internal/flutterwave"
 	"github.com/khaleelhabeeb/relay/internal/paystack"
 	"github.com/khaleelhabeeb/relay/internal/routing"
 	"github.com/khaleelhabeeb/relay/internal/store"
@@ -268,5 +269,72 @@ func TestAcceptUsesRegistrations(t *testing.T) {
 	}
 	if dels, _ := acc.Store.DeliveriesForEvent(ctx, e.ID); len(dels) != 0 {
 		t.Fatal("ambiguous event must not be delivered")
+	}
+}
+
+func TestAcceptFlutterwave(t *testing.T) {
+	acc, st, _ := newAcceptor(t)
+	ctx := context.Background()
+	accept := func(raw []byte) *store.Event {
+		t.Helper()
+		ad := flutterwave.Adapter{}
+		e, err := ad.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := ad.ExtractIdentifiers(e)
+		a := &Accepted{Event: e, Identifiers: ids, DedupKey: ad.DedupKey(e, ids), ReceivedAt: time.Now().UTC()}
+		if err := acc.Accept(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		var id string
+		err = st.WithTx(ctx, func(tx *store.Tx) error {
+			var err error
+			id, _, err = tx.EventIDByDedupKey(ctx, "flutterwave", a.DedupKey)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev, err := st.GetEvent(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ev
+	}
+
+	for _, tc := range []struct {
+		fixture string
+		status  routing.Outcome
+		app     string
+	}{
+		{"charge_completed_card.json", routing.Matched, "app_a"},
+		{"charge_completed_meta.json", routing.Matched, "app_b"},
+		{"charge_completed_meta_data_toplevel.json", routing.Matched, "app_b"},
+		{"transfer_completed.json", routing.Unsupported, ""},
+	} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "flutterwave", tc.fixture))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev := accept(raw); ev.Provider != "flutterwave" || ev.RoutingStatus != tc.status || ev.ApplicationID != tc.app {
+			t.Errorf("%s: event = %+v", tc.fixture, ev)
+		}
+	}
+
+	// Registrations are per provider: a Paystack registration of a tx_ref
+	// does not claim a Flutterwave event with that reference.
+	past := time.Now().Add(-time.Hour)
+	if _, _, err := st.CreateRegistration(ctx, "paystack", routing.IdentifierReference, "FLW_REF_1", "app_a", past); err != nil {
+		t.Fatal(err)
+	}
+	if ev := accept([]byte(`{"event":"charge.completed","data":{"id":1,"tx_ref":"FLW_REF_1","status":"successful"}}`)); ev.RoutingStatus != routing.Unresolved {
+		t.Fatalf("paystack registration claimed a flutterwave event: %+v", ev)
+	}
+	if _, _, err := st.CreateRegistration(ctx, "flutterwave", routing.IdentifierReference, "FLW_REF_2", "app_b", past); err != nil {
+		t.Fatal(err)
+	}
+	if ev := accept([]byte(`{"event":"charge.completed","data":{"id":2,"tx_ref":"FLW_REF_2","status":"successful"}}`)); ev.RoutingStatus != routing.Matched || ev.ApplicationID != "app_b" {
+		t.Fatalf("flutterwave registration did not route: %+v", ev)
 	}
 }

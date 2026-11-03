@@ -184,7 +184,8 @@ func TestDeliversBothFormatsWithValidSignatures(t *testing.T) {
 		if r.err != nil {
 			t.Errorf("%s: signature: %v", r.format, r.err)
 		}
-		if r.header.Get("Content-Type") != "application/json" || r.header.Get(HeaderAttempt) != "1" {
+		if r.header.Get("Content-Type") != "application/json" || r.header.Get(HeaderAttempt) != "1" ||
+			r.header.Get(HeaderProvider) != "paystack" {
 			t.Errorf("%s: headers %v", r.format, r.header)
 		}
 		switch r.format {

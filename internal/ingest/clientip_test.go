@@ -73,7 +73,7 @@ func TestHandlerLimitsAndAllowlist(t *testing.T) {
 	body := []byte(`{"event":"charge.success","data":{"id":1,"reference":"X"}}`)
 	sig := paystack.Sign(secret, body)
 	acc := &blockingAcceptor{entered: make(chan struct{}, 10), release: make(chan struct{})}
-	h := &Handler{Secret: secret, MaxBodyBytes: 1 << 20, Acceptor: acc, MaxConcurrent: 2,
+	h := &Handler{Adapter: paystack.Adapter{Secret: secret}, MaxBodyBytes: 1 << 20, Acceptor: acc, MaxConcurrent: 2,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	send := func() int {

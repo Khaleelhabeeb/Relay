@@ -11,6 +11,15 @@ registration API are versioned on their own. Breaking changes to them bump those
 First release: a self-hosted Paystack webhook router.
 
 ### Added
+- **Flutterwave provider.**
+  - `POST /webhooks/flutterwave` accepts `flutterwave-signature` (HMAC-SHA256) or `verif-hash`.
+  - Routes `charge.completed` by `tx_ref` prefix, `meta`/`meta_data`, or a registered `tx_ref`.
+  - Deduplicates on `event:data.id:status`.
+  - Configured under `providers.flutterwave`. Both providers are now optional, but at least one is
+    required.
+- **Provider-scoped routes.** The optional `routes[].provider` field limits a route to one provider.
+- **`X-Relay-Provider` delivery header.** The envelope's `provider` names the event's real source.
+- The `relay_webhooks_received_total` metric gains a `provider` label.
 - **Inbound webhooks.** `POST /webhooks/paystack` verifies HMAC-SHA512 over the exact raw body.
   It acknowledges Paystack only after the event, its routing decision and any delivery are
   committed to SQLite with `synchronous=FULL`. Repeated webhooks are deduplicated, on

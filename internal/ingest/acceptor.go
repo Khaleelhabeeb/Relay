@@ -12,8 +12,6 @@ import (
 	"github.com/khaleelhabeeb/relay/internal/store"
 )
 
-const providerPaystack = "paystack"
-
 // StoreAcceptor durably records events. In one transaction it either counts
 // a duplicate, or inserts the event, its routing decision and (when matched)
 // a pending delivery. The webhook is acknowledged only after commit.
@@ -28,13 +26,14 @@ type StoreAcceptor struct {
 }
 
 func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
+	prov := a.Event.Provider
 	var (
 		eventID   string
 		duplicate bool
 		decision  routing.Decision
 	)
 	err := s.Store.WithTx(ctx, func(tx *store.Tx) error {
-		existing, found, err := tx.EventIDByDedupKey(ctx, providerPaystack, a.DedupKey)
+		existing, found, err := tx.EventIDByDedupKey(ctx, prov, a.DedupKey)
 		if err != nil {
 			return err
 		}
@@ -43,7 +42,7 @@ func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
 			return tx.RecordDuplicate(ctx, existing, a.ReceivedAt)
 		}
 
-		decision, err = s.Engine.Resolve(ctx, a.Event.Type, a.Identifiers, a.ReceivedAt, tx.RegistrationLookup(providerPaystack))
+		decision, err = s.Engine.Resolve(ctx, prov, a.Event.Type, a.Identifiers, a.ReceivedAt, tx.RegistrationLookup(prov))
 		if err != nil {
 			return err
 		}
@@ -52,7 +51,7 @@ func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
 		sum := sha256.Sum256(a.Event.Raw)
 		e := &store.Event{
 			ID:            eventID,
-			Provider:      providerPaystack,
+			Provider:      prov,
 			EventType:     a.Event.Type,
 			DedupKey:      a.DedupKey,
 			RawPayload:    a.Event.Raw,
@@ -74,11 +73,11 @@ func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
 		return err
 	}
 
-	log := s.Logger.With("component", "ingest", "event_id", eventID, "event_type", a.Event.Type)
+	log := s.Logger.With("component", "ingest", "provider", prov, "event_id", eventID, "event_type", a.Event.Type)
 	if duplicate {
-		s.Metrics.Webhook("duplicate")
+		s.Metrics.Webhook(prov, "duplicate")
 	} else {
-		s.Metrics.Webhook("accepted")
+		s.Metrics.Webhook(prov, "accepted")
 		s.Metrics.Routed(string(decision.Outcome))
 	}
 	switch {

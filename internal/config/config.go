@@ -80,15 +80,56 @@ type StorageConfig struct {
 	DSN    string `yaml:"dsn"`
 }
 
+// ProvidersConfig enables payment providers; a nil entry is disabled. At
+// least one is required.
 type ProvidersConfig struct {
-	Paystack PaystackConfig `yaml:"paystack"`
+	Paystack    *PaystackConfig    `yaml:"paystack"`
+	Flutterwave *FlutterwaveConfig `yaml:"flutterwave"`
 }
+
+// Names returns the enabled providers' names, in a fixed order.
+func (p ProvidersConfig) Names() []string {
+	var out []string
+	if p.Paystack != nil {
+		out = append(out, ProviderPaystack)
+	}
+	if p.Flutterwave != nil {
+		out = append(out, ProviderFlutterwave)
+	}
+	return out
+}
+
+// AllowedIPs returns the source allowlist of the named provider.
+func (p ProvidersConfig) AllowedIPs(name string) []string {
+	switch {
+	case name == ProviderPaystack && p.Paystack != nil:
+		return p.Paystack.AllowedIPs
+	case name == ProviderFlutterwave && p.Flutterwave != nil:
+		return p.Flutterwave.AllowedIPs
+	}
+	return nil
+}
+
+// Provider names, matching provider.Paystack and provider.Flutterwave.
+const (
+	ProviderPaystack    = "paystack"
+	ProviderFlutterwave = "flutterwave"
+)
 
 type PaystackConfig struct {
 	SecretEnv  string   `yaml:"secret_env"`
 	AllowedIPs []string `yaml:"allowed_ips"`
 
 	Secret string `yaml:"-"`
+}
+
+// FlutterwaveConfig names the secret hash set under Settings > Webhooks in
+// the Flutterwave dashboard.
+type FlutterwaveConfig struct {
+	SecretHashEnv string   `yaml:"secret_hash_env"`
+	AllowedIPs    []string `yaml:"allowed_ips"`
+
+	SecretHash string `yaml:"-"`
 }
 
 type ApplicationConfig struct {
@@ -105,9 +146,11 @@ type ApplicationConfig struct {
 }
 
 // RouteConfig sends events to Application when every set matcher holds:
-// the reference starts with ReferencePrefix (if set) and each Metadata key
-// equals its value (if any are set).
+// the event comes from Provider (if set), the reference starts with
+// ReferencePrefix (if set) and each Metadata key equals its value (if any
+// are set).
 type RouteConfig struct {
+	Provider    string      `yaml:"provider"`
 	Application string      `yaml:"application"`
 	Match       MatchConfig `yaml:"match"`
 }
@@ -270,7 +313,12 @@ func (c *Config) resolveSecrets(env LookupEnv) []error {
 		}
 		return v
 	}
-	c.Providers.Paystack.Secret = get("providers.paystack.secret_env", c.Providers.Paystack.SecretEnv, true)
+	if p := c.Providers.Paystack; p != nil {
+		p.Secret = get("providers.paystack.secret_env", p.SecretEnv, true)
+	}
+	if p := c.Providers.Flutterwave; p != nil {
+		p.SecretHash = get("providers.flutterwave.secret_hash_env", p.SecretHashEnv, true)
+	}
 	for _, id := range c.sortedAppIDs() {
 		app := c.Applications[id]
 		if app == nil {

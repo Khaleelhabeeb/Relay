@@ -14,7 +14,7 @@ import (
 
 func TestNilSafe(t *testing.T) {
 	var m *Metrics
-	m.Webhook("accepted")
+	m.Webhook("paystack", "accepted")
 	m.AcceptLatency(time.Millisecond)
 	m.Routed("matched")
 	m.Attempt("a", "", time.Millisecond, false)
@@ -27,8 +27,8 @@ func TestExposition(t *testing.T) {
 	}
 	defer st.Close()
 	m := New(st)
-	m.Webhook("accepted")
-	m.Webhook("invalid_signature")
+	m.Webhook("paystack", "accepted")
+	m.Webhook("flutterwave", "invalid_signature")
 	m.Routed("unresolved")
 	m.Attempt("app_a", "", 20*time.Millisecond, false)
 	m.Attempt("app_a", "timeout", time.Second, true)
@@ -37,8 +37,8 @@ func TestExposition(t *testing.T) {
 	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	body, _ := io.ReadAll(rec.Body)
 	for _, want := range []string{
-		`relay_webhooks_received_total{result="accepted"} 1`,
-		`relay_webhooks_received_total{result="invalid_signature"} 1`,
+		`relay_webhooks_received_total{provider="paystack",result="accepted"} 1`,
+		`relay_webhooks_received_total{provider="flutterwave",result="invalid_signature"} 1`,
 		`relay_events_routed_total{outcome="unresolved"} 1`,
 		`relay_delivery_attempts_total{application="app_a",result="success"} 1`,
 		`relay_delivery_attempts_total{application="app_a",result="timeout"} 1`,

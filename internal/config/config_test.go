@@ -10,6 +10,8 @@ import (
 func testEnv(overrides map[string]string) LookupEnv {
 	env := map[string]string{
 		"PAYSTACK_SECRET_KEY":        "sk_test_xxx",
+		"FLW_SECRET_HASH":            "flw_hash_xxx",
+		"FLUTTERWAVE_SECRET_HASH":    "flw_hash_xxx",
 		"APP_A_RELAY_SIGNING_SECRET": strings.Repeat("a", 32),
 		"APP_A_RELAY_API_TOKEN":      strings.Repeat("b", 32),
 		"APP_B_RELAY_SIGNING_SECRET": strings.Repeat("c", 32),
@@ -39,6 +41,8 @@ applications:
     registration_token_env: APP_B_RELAY_API_TOKEN
     payload_format: envelope
 `
+
+var bothProviders = strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}, flutterwave: {secret_hash_env: FLW_SECRET_HASH}}", 1)
 
 func loadYAML(t *testing.T, yaml string, env LookupEnv) (*Config, error) {
 	t.Helper()
@@ -113,6 +117,11 @@ func TestValidationErrors(t *testing.T) {
 		{"bad trusted proxy", base + "server: {trusted_proxies: [not-an-ip]}\n", nil, "trusted_proxies"},
 		{"api_listen same as listen", base + "server: {listen: ':8080', api_listen: ':8080'}\n", nil, "api_listen"},
 		{"unsupported version", "version: 2\n" + base, nil, "unsupported version"},
+		{"no providers", strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "", 1), nil, "at least one provider"},
+		{"missing flutterwave hash", bothProviders, map[string]string{"FLW_SECRET_HASH": ""}, "FLW_SECRET_HASH is not set"},
+		{"bad flutterwave allowlist", strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "providers: {flutterwave: {secret_hash_env: FLW_SECRET_HASH, allowed_ips: [nope]}}", 1), nil, "providers.flutterwave.allowed_ips"},
+		{"route provider not configured", base + "routes: [{provider: flutterwave, application: app_a, match: {reference_prefix: X_}}]\n", nil, `"flutterwave" is not a configured provider`},
+		{"unscoped route overlaps scoped", bothProviders + "routes:\n- {provider: flutterwave, application: app_a, match: {reference_prefix: A}}\n- {application: app_b, match: {reference_prefix: A}}\n", nil, "overlap"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,6 +138,8 @@ func TestValidationAccepts(t *testing.T) {
 		"prefix vs metadata (runtime ambiguity only)": base + "routes:\n- {application: app_a, match: {reference_prefix: APPA_}}\n- {application: app_b, match: {metadata: {application: app_b}}}\n",
 		"disjoint prefixes":                           base + "routes:\n- {application: app_a, match: {reference_prefix: APPA_}}\n- {application: app_b, match: {reference_prefix: ED_}}\n",
 		"same app overlapping":                        base + "routes:\n- {application: app_a, match: {reference_prefix: S}}\n- {application: app_a, match: {reference_prefix: APPA_}}\n",
+		"same prefix, different providers":            bothProviders + "routes:\n- {provider: paystack, application: app_a, match: {reference_prefix: A}}\n- {provider: flutterwave, application: app_b, match: {reference_prefix: A}}\n",
+		"flutterwave only":                            strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "providers: {flutterwave: {secret_hash_env: FLW_SECRET_HASH}}", 1),
 		"insecure local opt-in":                       strings.Replace(base, "https://uni.example.com", "http://127.0.0.1:9000", 1) + "delivery: {allow_insecure_local: true}\n",
 	}
 	for name, y := range cases {

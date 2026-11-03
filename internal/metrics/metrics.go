@@ -31,8 +31,8 @@ func New(st *store.Store) *Metrics {
 		registry: prometheus.NewRegistry(),
 		webhooks: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "relay_webhooks_received_total",
-			Help: "Inbound Paystack webhooks by result (accepted, duplicate, invalid_signature, invalid_payload, payload_too_large, storage_error, server_busy, forbidden_source).",
-		}, []string{"result"}),
+			Help: "Inbound webhooks by provider and result (accepted, duplicate, invalid_signature, invalid_payload, payload_too_large, storage_error, server_busy, forbidden_source).",
+		}, []string{"provider", "result"}),
 		acceptLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "relay_webhook_accept_duration_seconds",
 			Help:    "Time from request start to durable acceptance (or refusal) of a verified webhook.",
@@ -69,9 +69,9 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
 }
 
-func (m *Metrics) Webhook(result string) {
+func (m *Metrics) Webhook(provider, result string) {
 	if m != nil {
-		m.webhooks.WithLabelValues(result).Inc()
+		m.webhooks.WithLabelValues(provider, result).Inc()
 	}
 }
 

@@ -12,10 +12,11 @@ import (
 const EnvelopeVersion = 1
 
 // BuildBody returns the request body for an application's payload format.
-// "original" is the exact signed Paystack bytes. "envelope" wraps them; the
+// "original" is the exact signed provider bytes. "envelope" wraps them; the
 // original bytes are spliced in verbatim rather than re-encoded, so
-// recipients that verify or hash the provider payload see what Paystack sent.
-func BuildBody(format string, raw []byte, eventID, eventType, application string, receivedAt time.Time) ([]byte, error) {
+// recipients that verify or hash the provider payload see what the provider
+// sent.
+func BuildBody(format string, raw []byte, eventID, provider, eventType, application string, receivedAt time.Time) ([]byte, error) {
 	switch format {
 	case config.PayloadOriginal, "":
 		return raw, nil
@@ -30,7 +31,7 @@ func BuildBody(format string, raw []byte, eventID, eventType, application string
 			Provider     string `json:"provider"`
 			Application  string `json:"application"`
 			ReceivedAt   string `json:"received_at"`
-		}{EnvelopeVersion, eventID, eventType, "paystack", application, receivedAt.UTC().Format(time.RFC3339Nano)})
+		}{EnvelopeVersion, eventID, eventType, provider, application, receivedAt.UTC().Format(time.RFC3339Nano)})
 		if err != nil {
 			return nil, err
 		}

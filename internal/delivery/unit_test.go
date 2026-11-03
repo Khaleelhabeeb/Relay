@@ -77,12 +77,12 @@ func TestBuildBody(t *testing.T) {
 	raw := []byte("{\n  \"event\": \"charge.success\",\n  \"data\": {\"id\": 1, \"amount\": 500000}\n}")
 	received := time.Date(2026, 11, 2, 10, 0, 0, 123000000, time.UTC)
 
-	orig, err := BuildBody("original", raw, "evt_1", "charge.success", "app_a", received)
+	orig, err := BuildBody("original", raw, "evt_1", "paystack", "charge.success", "app_a", received)
 	if err != nil || !bytes.Equal(orig, raw) {
 		t.Fatalf("original must be the exact bytes: %q %v", orig, err)
 	}
 
-	env, err := BuildBody("envelope", raw, "evt_1", "charge.success", "app_b", received)
+	env, err := BuildBody("envelope", raw, "evt_1", "paystack", "charge.success", "app_b", received)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,10 +106,10 @@ func TestBuildBody(t *testing.T) {
 		t.Fatalf("envelope = %+v", got)
 	}
 
-	if _, err := BuildBody("envelope", []byte("{bad"), "e", "t", "a", received); err == nil {
+	if _, err := BuildBody("envelope", []byte("{bad"), "e", "p", "t", "a", received); err == nil {
 		t.Error("invalid stored JSON must fail")
 	}
-	if _, err := BuildBody("xml", raw, "e", "t", "a", received); err == nil {
+	if _, err := BuildBody("xml", raw, "e", "p", "t", "a", received); err == nil {
 		t.Error("unknown format must fail")
 	}
 }

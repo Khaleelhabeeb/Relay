@@ -36,6 +36,8 @@ FUZZTIME ?= 30s
 fuzz:
 	$(GO) test -run '^$$' -fuzz '^FuzzVerify$$' -fuzztime $(FUZZTIME) ./internal/paystack
 	$(GO) test -run '^$$' -fuzz '^FuzzParseAndExtract$$' -fuzztime $(FUZZTIME) ./internal/paystack
+	$(GO) test -run '^$$' -fuzz '^FuzzVerify$$' -fuzztime $(FUZZTIME) ./internal/flutterwave
+	$(GO) test -run '^$$' -fuzz '^FuzzParseAndExtract$$' -fuzztime $(FUZZTIME) ./internal/flutterwave
 	$(GO) test -run '^$$' -fuzz '^FuzzEnvelope$$' -fuzztime $(FUZZTIME) ./internal/delivery
 	$(GO) test -run '^$$' -fuzz '^FuzzVerifySignature$$' -fuzztime $(FUZZTIME) ./internal/delivery
 	$(GO) test -run '^$$' -fuzz '^FuzzLoad$$' -fuzztime $(FUZZTIME) ./internal/config

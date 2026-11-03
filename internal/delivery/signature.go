@@ -17,6 +17,9 @@ const (
 	HeaderTimestamp  = "X-Relay-Timestamp"
 	HeaderSignature  = "X-Relay-Signature"
 	HeaderAttempt    = "X-Relay-Attempt"
+	// HeaderProvider names the payment provider the event came from. It is
+	// not signed; the body itself identifies the provider.
+	HeaderProvider = "X-Relay-Provider"
 )
 
 // DefaultTolerance is the clock skew recipients should accept.

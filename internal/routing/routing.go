@@ -15,6 +15,7 @@ import (
 
 	"github.com/khaleelhabeeb/relay/internal/config"
 	"github.com/khaleelhabeeb/relay/internal/paystack"
+	"github.com/khaleelhabeeb/relay/internal/provider"
 )
 
 type Outcome string
@@ -38,15 +39,18 @@ const (
 	SourceRegistration = "registration"
 )
 
-// supportedEvents are the event types v1 routes. Others are stored as
-// unsupported until their ownership fields are verified against real payloads.
-var supportedEvents = map[string]bool{
-	"charge.success": true,
+// supportedEvents are the event types routed per provider. Others are stored
+// as unsupported until their ownership fields are verified against real
+// payloads.
+var supportedEvents = map[string]map[string]bool{
+	provider.Paystack:    {"charge.success": true},
+	provider.Flutterwave: {"charge.completed": true},
 }
 
 // Rule is a static route from configuration.
 type Rule struct {
 	Name            string // e.g. "routes[0]"
+	Provider        string // "" matches every provider
 	Application     string
 	ReferencePrefix string
 	Metadata        map[string]string
@@ -93,6 +97,7 @@ func RulesFromConfig(routes []config.RouteConfig) []Rule {
 	for i, r := range routes {
 		rules[i] = Rule{
 			Name:            fmt.Sprintf("routes[%d]", i),
+			Provider:        r.Provider,
 			Application:     r.Application,
 			ReferencePrefix: r.Match.ReferencePrefix,
 			Metadata:        r.Match.Metadata,
@@ -102,14 +107,18 @@ func RulesFromConfig(routes []config.RouteConfig) []Rule {
 }
 
 // Resolve gathers every rule and registration that claims the event and
-// reduces them to a decision. lookup may be nil (no registrations).
-func (e *Engine) Resolve(ctx context.Context, eventType string, ids paystack.Identifiers, receivedAt time.Time, lookup RegistrationLookup) (Decision, error) {
-	if !supportedEvents[eventType] {
+// reduces them to a decision. lookup may be nil (no registrations) and must
+// cover only prov's registrations.
+func (e *Engine) Resolve(ctx context.Context, prov, eventType string, ids provider.Identifiers, receivedAt time.Time, lookup RegistrationLookup) (Decision, error) {
+	if !supportedEvents[prov][eventType] {
 		return Decision{Outcome: Unsupported, Reason: fmt.Sprintf("event type %q is not routed in this version", eventType)}, nil
 	}
 
 	var cands []Candidate
 	for _, r := range e.rules {
+		if r.Provider != "" && r.Provider != prov {
+			continue
+		}
 		if detail, ok := r.match(ids); ok {
 			cands = append(cands, Candidate{Application: r.Application, Source: SourceRule, Detail: r.Name + " " + detail})
 		}
@@ -140,14 +149,14 @@ func (e *Engine) Resolve(ctx context.Context, eventType string, ids paystack.Ide
 		return Decision{Outcome: Matched, Application: apps[0], Candidates: cands,
 			Reason: fmt.Sprintf("%d matching rule(s)/registration(s), one application", len(cands))}, nil
 	case 0:
-		return Decision{Outcome: Unresolved, Candidates: cands, Reason: unresolvedReason(ids)}, nil
+		return Decision{Outcome: Unresolved, Candidates: cands, Reason: unresolvedReason(prov, ids)}, nil
 	default:
 		return Decision{Outcome: Ambiguous, Candidates: cands,
 			Reason: "conflicting owners: " + strings.Join(apps, ", ")}, nil
 	}
 }
 
-func (r Rule) match(ids paystack.Identifiers) (string, bool) {
+func (r Rule) match(ids provider.Identifiers) (string, bool) {
 	var parts []string
 	if r.ReferencePrefix != "" {
 		if ids.Reference == "" || !strings.HasPrefix(ids.Reference, r.ReferencePrefix) {
@@ -202,8 +211,8 @@ func distinctApps(cands []Candidate) []string {
 	return apps
 }
 
-func unresolvedReason(ids paystack.Identifiers) string {
-	if ids.Channel == paystack.ChannelDedicatedNUBAN && ids.DedicatedAccount == nil {
+func unresolvedReason(prov string, ids provider.Identifiers) string {
+	if prov == provider.Paystack && ids.Channel == paystack.ChannelDedicatedNUBAN && ids.DedicatedAccount == nil {
 		return "dedicated_nuban event without receiver account fields"
 	}
 	if ids.Reference == "" && len(ids.Metadata) == 0 && ids.DedicatedAccount == nil {

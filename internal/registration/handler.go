@@ -9,9 +9,11 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +24,7 @@ import (
 
 	"github.com/khaleelhabeeb/relay/internal/apierr"
 	"github.com/khaleelhabeeb/relay/internal/config"
-	"github.com/khaleelhabeeb/relay/internal/paystack"
+	"github.com/khaleelhabeeb/relay/internal/provider"
 	"github.com/khaleelhabeeb/relay/internal/reprocess"
 	"github.com/khaleelhabeeb/relay/internal/routing"
 	"github.com/khaleelhabeeb/relay/internal/store"
@@ -35,7 +37,6 @@ const (
 	maxListLimit      = 500
 	defaultRatePerSec = 10
 	defaultBurst      = 20
-	providerPaystack  = "paystack"
 )
 
 type tokenEntry struct {
@@ -49,6 +50,7 @@ type Handler struct {
 	logger      *slog.Logger
 	now         func() time.Time
 	tokens      []tokenEntry
+	providers   []string // enabled providers
 	mux         *http.ServeMux
 
 	ratePerSec rate.Limit
@@ -68,6 +70,7 @@ func NewHandler(cfg *config.Config, st *store.Store, rp *reprocess.Reprocessor, 
 		ratePerSec:  defaultRatePerSec,
 		burst:       defaultBurst,
 		limiters:    map[string]*rate.Limiter{},
+		providers:   cfg.Providers.Names(),
 		mux:         http.NewServeMux(),
 	}
 	for id, app := range cfg.Applications {
@@ -161,11 +164,11 @@ func toJSON(r *store.Registration) registrationJSON {
 	return out
 }
 
-// normalize validates a create request and returns the canonical
-// identifier value.
-func normalize(req createRequest) (string, error) {
-	if req.Provider != providerPaystack {
-		return "", errors.New(`provider must be "paystack"`)
+// normalize validates a create request against the enabled providers and
+// returns the canonical identifier value.
+func normalize(req createRequest, providers []string) (string, error) {
+	if !slices.Contains(providers, req.Provider) {
+		return "", fmt.Errorf("provider must be one of: %s", strings.Join(providers, ", "))
 	}
 	switch req.Type {
 	case routing.IdentifierReference:
@@ -181,10 +184,13 @@ func normalize(req createRequest) (string, error) {
 		}
 		return v, nil
 	case routing.IdentifierDedicatedAccount:
+		if req.Provider != provider.Paystack {
+			return "", errors.New("dedicated_account applies only to paystack")
+		}
 		if req.Value != "" {
 			return "", errors.New("use bank and account_number for dedicated_account, not value")
 		}
-		da, ok := paystack.NewDedicatedAccount(req.Bank, req.AccountNumber)
+		da, ok := provider.NewDedicatedAccount(req.Bank, req.AccountNumber)
 		if !ok {
 			return "", errors.New("bank and account_number (digits) are required")
 		}
@@ -199,14 +205,14 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, app string) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	value, err := normalize(req)
+	value, err := normalize(req, h.providers)
 	if err != nil {
 		apierr.Write(w, http.StatusUnprocessableEntity, apierr.ValidationFailed, err.Error())
 		return
 	}
-	log := h.logger.With("application", app, "type", req.Type)
+	log := h.logger.With("application", app, "provider", req.Provider, "type", req.Type)
 
-	reg, created, err := h.store.CreateRegistration(r.Context(), providerPaystack, req.Type, value, app, h.now())
+	reg, created, err := h.store.CreateRegistration(r.Context(), req.Provider, req.Type, value, app, h.now())
 	switch {
 	case errors.Is(err, store.ErrRegistrationConflict):
 		log.Warn("registration conflict")
@@ -229,7 +235,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, app string) {
 		// Route webhooks that arrived before this registration. Failure here
 		// leaves those events unresolved for operator reprocessing; the
 		// registration itself is already durable.
-		res, err := h.reprocessor.Identifier(context.WithoutCancel(r.Context()), req.Type, value, store.DecidedByRegistration)
+		res, err := h.reprocessor.Identifier(context.WithoutCancel(r.Context()), req.Provider, req.Type, value, store.DecidedByRegistration)
 		if err != nil {
 			log.Error("reprocessing after registration failed", "registration_id", reg.ID, "error", err)
 		}

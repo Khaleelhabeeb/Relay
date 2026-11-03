@@ -36,11 +36,15 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if len(cfg.Providers.Paystack.AllowedIPs) > 0 {
-				logger.Info("webhook source allowlist enabled", "allowed", len(cfg.Providers.Paystack.AllowedIPs),
+			for _, name := range cfg.Providers.Names() {
+				allowed := cfg.Providers.AllowedIPs(name)
+				if len(allowed) == 0 {
+					continue
+				}
+				logger.Info("webhook source allowlist enabled", "provider", name, "allowed", len(allowed),
 					"trusted_proxies", len(cfg.Server.TrustedProxies))
 				if len(cfg.Server.TrustedProxies) == 0 {
-					logger.Warn("allowed_ips is set without server.trusted_proxies: behind a reverse proxy every webhook will appear to come from the proxy and be rejected")
+					logger.Warn("allowed_ips is set without server.trusted_proxies: behind a reverse proxy every webhook will appear to come from the proxy and be rejected", "provider", name)
 				}
 			}
 			if cfg.Delivery.AllowInsecureLocal {

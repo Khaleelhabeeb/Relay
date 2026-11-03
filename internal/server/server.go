@@ -13,8 +13,11 @@ import (
 
 	"github.com/khaleelhabeeb/relay/internal/apierr"
 	"github.com/khaleelhabeeb/relay/internal/config"
+	"github.com/khaleelhabeeb/relay/internal/flutterwave"
 	"github.com/khaleelhabeeb/relay/internal/ingest"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
+	"github.com/khaleelhabeeb/relay/internal/paystack"
+	"github.com/khaleelhabeeb/relay/internal/provider"
 )
 
 const shutdownTimeout = 15 * time.Second
@@ -37,18 +40,25 @@ type Deps struct {
 // listener unless cfg.Server.APIListen names a separate, private address.
 func New(cfg *config.Config, logger *slog.Logger, deps Deps) *Server {
 	mux := http.NewServeMux()
-	mux.Handle("POST /webhooks/paystack", &ingest.Handler{
-		Secret:        cfg.Providers.Paystack.Secret,
-		MaxBodyBytes:  cfg.Server.MaxBodyBytes,
-		Acceptor:      deps.Acceptor,
-		Logger:        logger,
-		Metrics:       deps.Metrics,
-		MaxConcurrent: cfg.Server.MaxConcurrentWebhooks,
-		IPFilter: &ingest.IPFilter{
-			Allowed:        config.ParsePrefixes(cfg.Providers.Paystack.AllowedIPs),
-			TrustedProxies: config.ParsePrefixes(cfg.Server.TrustedProxies),
-		},
-	})
+	// One concurrency budget across providers: they share the database writer.
+	var sem chan struct{}
+	if cfg.Server.MaxConcurrentWebhooks > 0 {
+		sem = make(chan struct{}, cfg.Server.MaxConcurrentWebhooks)
+	}
+	for _, ad := range Adapters(cfg) {
+		mux.Handle("POST /webhooks/"+ad.Name(), &ingest.Handler{
+			Adapter:      ad,
+			MaxBodyBytes: cfg.Server.MaxBodyBytes,
+			Acceptor:     deps.Acceptor,
+			Logger:       logger,
+			Metrics:      deps.Metrics,
+			Sem:          sem,
+			IPFilter: &ingest.IPFilter{
+				Allowed:        config.ParsePrefixes(cfg.Providers.AllowedIPs(ad.Name())),
+				TrustedProxies: config.ParsePrefixes(cfg.Server.TrustedProxies),
+			},
+		})
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		apierr.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -78,6 +88,18 @@ func New(cfg *config.Config, logger *slog.Logger, deps Deps) *Server {
 		private.Handle("GET /metrics", deps.Metrics.Handler())
 	}
 	return s
+}
+
+// Adapters returns the webhook adapters of the enabled providers.
+func Adapters(cfg *config.Config) []provider.Adapter {
+	var out []provider.Adapter
+	if p := cfg.Providers.Paystack; p != nil {
+		out = append(out, paystack.Adapter{Secret: p.Secret})
+	}
+	if p := cfg.Providers.Flutterwave; p != nil {
+		out = append(out, flutterwave.Adapter{SecretHash: p.SecretHash})
+	}
+	return out
 }
 
 func newHTTPServer(addr string, h http.Handler, logger *slog.Logger) *http.Server {

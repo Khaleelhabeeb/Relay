@@ -1,6 +1,6 @@
-// Package ingest implements POST /webhooks/paystack: verify the raw body,
+// Package ingest implements POST /webhooks/<provider>: verify the raw body,
 // parse it, derive identifiers and the dedup key, hand it to an Acceptor,
-// and acknowledge Paystack only once the Acceptor reports success.
+// and acknowledge the provider only once the Acceptor reports success.
 package ingest
 
 import (
@@ -14,26 +14,26 @@ import (
 
 	"github.com/khaleelhabeeb/relay/internal/apierr"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
-	"github.com/khaleelhabeeb/relay/internal/paystack"
+	"github.com/khaleelhabeeb/relay/internal/provider"
 )
 
 // Accepted is a verified, parsed inbound event.
 type Accepted struct {
-	Event       *paystack.Event
-	Identifiers paystack.Identifiers
+	Event       *provider.Event
+	Identifiers provider.Identifiers
 	DedupKey    string
 	ReceivedAt  time.Time
 }
 
 // Acceptor durably records an accepted event. A nil error means it is safe
-// to acknowledge Paystack; any error makes the handler answer non-2xx so
-// Paystack retries.
+// to acknowledge the provider; any error makes the handler answer non-2xx so
+// the provider retries.
 type Acceptor interface {
 	Accept(ctx context.Context, a *Accepted) error
 }
 
 type Handler struct {
-	Secret       string
+	Adapter      provider.Adapter
 	MaxBodyBytes int64
 	Acceptor     Acceptor // nil: every event is refused with 503
 	Logger       *slog.Logger
@@ -41,9 +41,11 @@ type Handler struct {
 	Now          func() time.Time
 	IPFilter     *IPFilter // optional source allowlist
 	// MaxConcurrent caps webhooks being processed at once (0: unlimited).
-	// Excess requests get 503 so Paystack retries them later, instead of
-	// piling up behind the single database writer.
+	// Excess requests get 503 so the provider retries them later, instead of
+	// piling up behind the single database writer. Sem, if set, is used
+	// instead, so several handlers can share one budget.
 	MaxConcurrent int
+	Sem           chan struct{}
 
 	semOnce sync.Once
 	sem     chan struct{}
@@ -51,22 +53,28 @@ type Handler struct {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	log := h.Logger.With("component", "ingest", "remote_addr", r.RemoteAddr)
+	name := h.Adapter.Name()
+	log := h.Logger.With("component", "ingest", "provider", name, "remote_addr", r.RemoteAddr)
 
 	if ip, ok := h.IPFilter.Allows(r); !ok {
 		log.Warn("webhook rejected: source address not allowed", "client_ip", ip.String())
-		h.Metrics.Webhook("forbidden_source")
+		h.Metrics.Webhook(name, "forbidden_source")
 		apierr.Write(w, http.StatusForbidden, apierr.Forbidden, "source address not allowed")
 		return
 	}
-	if h.MaxConcurrent > 0 {
-		h.semOnce.Do(func() { h.sem = make(chan struct{}, h.MaxConcurrent) })
+	h.semOnce.Do(func() {
+		h.sem = h.Sem
+		if h.sem == nil && h.MaxConcurrent > 0 {
+			h.sem = make(chan struct{}, h.MaxConcurrent)
+		}
+	})
+	if h.sem != nil {
 		select {
 		case h.sem <- struct{}{}:
 			defer func() { <-h.sem }()
 		default:
-			log.Warn("webhook rejected: too many concurrent requests", "limit", h.MaxConcurrent)
-			h.Metrics.Webhook("server_busy")
+			log.Warn("webhook rejected: too many concurrent requests", "limit", cap(h.sem))
+			h.Metrics.Webhook(name, "server_busy")
 			w.Header().Set("Retry-After", "5")
 			apierr.Write(w, http.StatusServiceUnavailable, apierr.ServerBusy, "server busy, retry later")
 			return
@@ -78,44 +86,44 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			log.Warn("webhook rejected: body too large", "limit_bytes", h.MaxBodyBytes)
-			h.Metrics.Webhook("payload_too_large")
+			h.Metrics.Webhook(name, "payload_too_large")
 			apierr.Write(w, http.StatusRequestEntityTooLarge, apierr.PayloadTooLarge, "request body too large")
 			return
 		}
 		log.Warn("webhook rejected: reading body failed", "error", err)
-		h.Metrics.Webhook("invalid_payload")
+		h.Metrics.Webhook(name, "invalid_payload")
 		apierr.Write(w, http.StatusBadRequest, apierr.InvalidPayload, "could not read request body")
 		return
 	}
 
-	if err := paystack.Verify(h.Secret, body, r.Header.Get(paystack.SignatureHeader)); err != nil {
+	if err := h.Adapter.Verify(r.Header, body); err != nil {
 		log.Warn("webhook rejected: signature", "error", err, "body_bytes", len(body))
-		h.Metrics.Webhook("invalid_signature")
+		h.Metrics.Webhook(name, "invalid_signature")
 		apierr.Write(w, http.StatusUnauthorized, apierr.InvalidSignature, "signature verification failed")
 		return
 	}
 
-	evt, err := paystack.Parse(body)
+	evt, err := h.Adapter.Parse(body)
 	if err != nil {
 		log.Error("signed webhook could not be parsed", "error", err, "body_bytes", len(body))
-		h.Metrics.Webhook("invalid_payload")
+		h.Metrics.Webhook(name, "invalid_payload")
 		apierr.Write(w, http.StatusBadRequest, apierr.InvalidPayload, "malformed event")
 		return
 	}
-	ids := paystack.ExtractIdentifiers(evt)
-	a := &Accepted{Event: evt, Identifiers: ids, DedupKey: paystack.DedupKey(evt, ids), ReceivedAt: h.now()}
+	ids := h.Adapter.ExtractIdentifiers(evt)
+	a := &Accepted{Event: evt, Identifiers: ids, DedupKey: h.Adapter.DedupKey(evt, ids), ReceivedAt: h.now()}
 	log = log.With("event_type", evt.Type, "dedup_key", a.DedupKey)
 
 	defer func() { h.Metrics.AcceptLatency(time.Since(start)) }()
 	if h.Acceptor == nil {
 		log.Error("webhook refused: no durable storage configured")
-		h.Metrics.Webhook("storage_error")
+		h.Metrics.Webhook(name, "storage_error")
 		apierr.Write(w, http.StatusServiceUnavailable, apierr.StorageUnavailable, "event could not be stored")
 		return
 	}
 	if err := h.Acceptor.Accept(r.Context(), a); err != nil {
 		log.Error("webhook refused: accept failed", "error", err)
-		h.Metrics.Webhook("storage_error")
+		h.Metrics.Webhook(name, "storage_error")
 		apierr.Write(w, http.StatusServiceUnavailable, apierr.StorageUnavailable, "event could not be stored")
 		return
 	}

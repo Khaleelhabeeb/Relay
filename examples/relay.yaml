@@ -14,6 +14,8 @@ storage:
 providers:
   paystack:
     secret_env: PAYSTACK_SECRET_KEY
+  flutterwave:
+    secret_hash_env: FLUTTERWAVE_SECRET_HASH   # Settings > Webhooks > Secret hash
 
 applications:
   app_a:
@@ -28,9 +30,13 @@ applications:
     payload_format: envelope
 
 routes:
-  - application: app_a
+  - application: app_a            # no provider: applies to Paystack and Flutterwave
     match:
       reference_prefix: "APPA_"
+  - provider: flutterwave          # this route applies to Flutterwave events only
+    application: app_b
+    match:
+      reference_prefix: "APPB_FLW_"
   - application: app_b
     match:
       metadata:

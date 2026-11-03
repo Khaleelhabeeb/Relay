@@ -18,6 +18,7 @@ type ClaimedDelivery struct {
 	AttemptID     string
 	AttemptNo     int // 1-based; already counted in deliveries.attempt_count
 	CycleAttempt  int // attempt number since the last manual retry; compare with max_attempts
+	Provider      string
 	EventType     string
 	RawPayload    []byte
 	ReceivedAt    time.Time
@@ -35,7 +36,7 @@ func (s *Store) ClaimDue(ctx context.Context, owner string, now, leaseUntil time
 	var out []ClaimedDelivery
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `SELECT d.id, d.event_id, d.application_id, d.attempt_count, d.retry_base,
-				e.event_type, e.raw_payload, e.received_at
+				e.provider, e.event_type, e.raw_payload, e.received_at
 			FROM deliveries d JOIN events e ON e.id = d.event_id
 			WHERE (d.status = 'pending' AND d.next_attempt_at <= ?)
 			   OR (d.status = 'in_flight' AND d.lease_until < ?)
@@ -51,7 +52,7 @@ func (s *Store) ClaimDue(ctx context.Context, owner string, now, leaseUntil time
 				base     int
 				received int64
 			)
-			if err := rows.Scan(&c.ID, &c.EventID, &c.ApplicationID, &attempts, &base, &c.EventType, &c.RawPayload, &received); err != nil {
+			if err := rows.Scan(&c.ID, &c.EventID, &c.ApplicationID, &attempts, &base, &c.Provider, &c.EventType, &c.RawPayload, &received); err != nil {
 				rows.Close()
 				return err
 			}

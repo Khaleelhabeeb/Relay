@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -54,9 +55,15 @@ func (c *Config) validate() []error {
 			fail("server.trusted_proxies: %q is not an IP address or CIDR", p)
 		}
 	}
-	for _, p := range c.Providers.Paystack.AllowedIPs {
-		if !validIPOrPrefix(p) {
-			fail("providers.paystack.allowed_ips: %q is not an IP address or CIDR", p)
+	providers := c.Providers.Names()
+	if len(providers) == 0 {
+		fail("providers: at least one provider (paystack or flutterwave) is required")
+	}
+	for _, name := range providers {
+		for _, p := range c.Providers.AllowedIPs(name) {
+			if !validIPOrPrefix(p) {
+				fail("providers.%s.allowed_ips: %q is not an IP address or CIDR", name, p)
+			}
 		}
 	}
 
@@ -112,6 +119,9 @@ func (c *Config) validate() []error {
 
 	for i, r := range c.Routes {
 		p := fmt.Sprintf("routes[%d]", i)
+		if r.Provider != "" && !slices.Contains(providers, r.Provider) {
+			fail("%s.provider: %q is not a configured provider", p, r.Provider)
+		}
 		if _, ok := c.Applications[r.Application]; !ok {
 			fail("%s.application: unknown application %q", p, r.Application)
 		}
@@ -127,7 +137,8 @@ func (c *Config) validate() []error {
 	for i := range c.Routes {
 		for j := i + 1; j < len(c.Routes); j++ {
 			a, b := c.Routes[i], c.Routes[j]
-			if a.Application != b.Application && (implies(a.Match, b.Match) || implies(b.Match, a.Match)) {
+			sameProvider := a.Provider == "" || b.Provider == "" || a.Provider == b.Provider
+			if a.Application != b.Application && sameProvider && (implies(a.Match, b.Match) || implies(b.Match, a.Match)) {
 				fail("routes[%d] (%s) and routes[%d] (%s) overlap: an event can match both, so ownership would be ambiguous",
 					i, a.Application, j, b.Application)
 			}

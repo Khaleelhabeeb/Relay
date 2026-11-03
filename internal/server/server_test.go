@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/khaleelhabeeb/relay/internal/config"
+	"github.com/khaleelhabeeb/relay/internal/flutterwave"
 	"github.com/khaleelhabeeb/relay/internal/ingest"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
 	"github.com/khaleelhabeeb/relay/internal/paystack"
@@ -41,7 +42,8 @@ func testConfig() *config.Config {
 	c := &config.Config{}
 	c.Server.Listen = "127.0.0.1:0"
 	c.Server.MaxBodyBytes = 64 << 10
-	c.Providers.Paystack.Secret = secret
+	c.Providers.Paystack = &config.PaystackConfig{Secret: secret}
+	c.Providers.Flutterwave = &config.FlutterwaveConfig{SecretHash: flwSecret}
 	return c
 }
 
@@ -101,6 +103,66 @@ func TestWebhookAcceptsSignedFixtures(t *testing.T) {
 	if first.DedupKey != "charge.success:4099260516" || first.Identifiers.Reference != "APPA_01JBQ7Z3K9X2" ||
 		!bytes.Equal(first.Event.Raw, fixture(t, names[0])) || first.ReceivedAt.IsZero() {
 		t.Errorf("unexpected accepted event: %+v", first)
+	}
+}
+
+const flwSecret = "flw_server_test_secret_hash"
+
+func TestFlutterwaveWebhook(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "flutterwave", "charge_completed_card.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(ts *httptest.Server, path string, hdr map[string]string) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+path, bytes.NewReader(body))
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	rec := &recorder{}
+	ts := newTestServer(t, rec)
+	if s := send(ts, "/webhooks/flutterwave", map[string]string{"verif-hash": flwSecret}); s != http.StatusOK {
+		t.Fatalf("verif-hash: status %d", s)
+	}
+	if s := send(ts, "/webhooks/flutterwave", map[string]string{"flutterwave-signature": flutterwave.Sign(flwSecret, body)}); s != http.StatusOK {
+		t.Fatalf("flutterwave-signature: status %d", s)
+	}
+	for name, hdr := range map[string]map[string]string{
+		"wrong verif-hash":             {"verif-hash": "nope"},
+		"no headers":                   {},
+		"paystack secret as hash":      {"verif-hash": secret},
+		"flutterwave hash to paystack": {"x-paystack-signature": flwSecret},
+	} {
+		path := "/webhooks/flutterwave"
+		if _, ok := hdr["x-paystack-signature"]; ok {
+			path = "/webhooks/paystack"
+		}
+		if s := send(ts, path, hdr); s != http.StatusUnauthorized {
+			t.Errorf("%s: status %d, want 401", name, s)
+		}
+	}
+	if len(rec.got) != 2 {
+		t.Fatalf("acceptor got %d events, want 2", len(rec.got))
+	}
+	a := rec.got[0]
+	if a.Event.Provider != "flutterwave" || a.Identifiers.Reference != "APPA_616626414629" ||
+		a.DedupKey != "charge.completed:285959875:successful" {
+		t.Fatalf("unexpected accepted event: %+v", a)
+	}
+
+	// A provider that is not configured has no endpoint.
+	c := testConfig()
+	c.Providers.Flutterwave = nil
+	ps := httptest.NewServer(New(c, slog.New(slog.NewTextHandler(io.Discard, nil)), Deps{Acceptor: &recorder{}}).Handler())
+	defer ps.Close()
+	if s := send(ps, "/webhooks/flutterwave", map[string]string{"verif-hash": flwSecret}); s != http.StatusNotFound && s != http.StatusMethodNotAllowed {
+		t.Fatalf("unconfigured provider: status %d", s)
 	}
 }
 

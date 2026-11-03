@@ -15,7 +15,7 @@ var Version = "dev"
 func NewRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "relay",
-		Short:         "Self-hosted Paystack webhook router",
+		Short:         "Self-hosted payment webhook router",
 		Version:       Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,

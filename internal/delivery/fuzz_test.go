@@ -14,7 +14,7 @@ func FuzzEnvelope(f *testing.F) {
 	f.Add([]byte(` [1, 2 ,3] `), "evt_\"quote", "type\n", "<script>")
 	f.Add([]byte(`"str"`), "", "", "")
 	f.Fuzz(func(t *testing.T, raw []byte, id, typ, app string) {
-		body, err := BuildBody("envelope", raw, id, typ, app, time.Unix(0, 0))
+		body, err := BuildBody("envelope", raw, id, "paystack", typ, app, time.Unix(0, 0))
 		if !json.Valid(raw) {
 			if err == nil {
 				t.Fatal("invalid stored JSON must be rejected")

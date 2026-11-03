@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
-# Sign a Paystack fixture with PAYSTACK_SECRET_KEY and POST it to Relay,
-# the way Paystack would. Usage: send-fixture.sh <file.json> [relay-url]
+# Sign a fixture the way the provider would and POST it to Relay.
+# Usage: send-fixture.sh [paystack|flutterwave] <file.json> [relay-base-url]
+# The provider defaults to paystack, so send-fixture.sh <file.json> still works.
 set -euo pipefail
-file=${1:?usage: send-fixture.sh <file.json> [relay-url]}
-url=${2:-http://127.0.0.1:8080/webhooks/paystack}
-: "${PAYSTACK_SECRET_KEY:?set PAYSTACK_SECRET_KEY (test key)}"
-sig=$(openssl dgst -sha512 -hmac "$PAYSTACK_SECRET_KEY" -hex < "$file" | awk '{print $NF}')
-curl -sS -X POST -H "Content-Type: application/json" -H "x-paystack-signature: $sig" \
+provider=paystack
+if [[ ${1:-} == paystack || ${1:-} == flutterwave ]]; then
+  provider=$1
+  shift
+fi
+file=${1:?usage: send-fixture.sh [paystack|flutterwave] <file.json> [relay-base-url]}
+base=${2:-http://127.0.0.1:8080}
+url="$base/webhooks/$provider"
+case $provider in
+  paystack)
+    : "${PAYSTACK_SECRET_KEY:?set PAYSTACK_SECRET_KEY (test key)}"
+    sig=$(openssl dgst -sha512 -hmac "$PAYSTACK_SECRET_KEY" -hex < "$file" | awk '{print $NF}')
+    header="x-paystack-signature: $sig"
+    ;;
+  flutterwave)
+    : "${FLUTTERWAVE_SECRET_HASH:?set FLUTTERWAVE_SECRET_HASH}"
+    sig=$(openssl dgst -sha256 -hmac "$FLUTTERWAVE_SECRET_HASH" -binary < "$file" | openssl base64 -A)
+    header="flutterwave-signature: $sig"
+    ;;
+esac
+curl -sS -X POST -H "Content-Type: application/json" -H "$header" \
   --data-binary @"$file" -w ' (HTTP %{http_code})\n' "$url"

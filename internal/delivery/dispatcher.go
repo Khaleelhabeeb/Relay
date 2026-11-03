@@ -204,7 +204,7 @@ func (d *Dispatcher) attempt(workCtx context.Context, c store.ClaimedDelivery) {
 
 	if app, ok := d.Apps[c.ApplicationID]; !ok {
 		r.ErrorCode, r.Error = "unknown_application", "application is not in the current configuration"
-	} else if body, err := BuildBody(app.PayloadFormat, c.RawPayload, c.EventID, c.EventType, app.ID, c.ReceivedAt); err != nil {
+	} else if body, err := BuildBody(app.PayloadFormat, c.RawPayload, c.EventID, c.Provider, c.EventType, app.ID, c.ReceivedAt); err != nil {
 		r.ErrorCode, r.Error = "payload_error", err.Error()
 	} else {
 		reqCtx, cancel := context.WithTimeout(workCtx, d.Timeout)
@@ -270,6 +270,7 @@ func (d *Dispatcher) send(ctx context.Context, app App, c store.ClaimedDelivery,
 	req.Header.Set(HeaderDeliveryID, c.ID)
 	req.Header.Set(HeaderTimestamp, ts)
 	req.Header.Set(HeaderAttempt, strconv.Itoa(c.AttemptNo))
+	req.Header.Set(HeaderProvider, c.Provider)
 	req.Header.Set(HeaderSignature, Sign(app.Secrets, ts, c.EventID, c.ID, body))
 
 	resp, err := d.Client.Do(req)

@@ -66,7 +66,7 @@ func TestResolve(t *testing.T) {
 	e := NewEngine(rules)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			d, err := e.Resolve(context.Background(), tc.event, tc.ids, t0, lookup)
+			d, err := e.Resolve(context.Background(), "paystack", tc.event, tc.ids, t0, lookup)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -83,15 +83,48 @@ func TestResolve(t *testing.T) {
 func TestResolveCustomerNeverRoutes(t *testing.T) {
 	// Customer fields aren't even part of Identifiers; metadata keys that
 	// look like customer data only route if an operator wrote a rule on them.
-	d, _ := NewEngine(rules).Resolve(context.Background(), "charge.success",
+	d, _ := NewEngine(rules).Resolve(context.Background(), "paystack", "charge.success",
 		paystack.Identifiers{Reference: "T1", Metadata: map[string]string{"customer_code": "CUS_1"}}, t0, nil)
 	if d.Outcome != Unresolved {
 		t.Fatalf("got %v", d.Outcome)
 	}
 }
 
+func TestResolveProviders(t *testing.T) {
+	scoped := []Rule{
+		{Name: "routes[0]", Provider: "paystack", Application: "app_a", ReferencePrefix: "A_"},
+		{Name: "routes[1]", Provider: "flutterwave", Application: "app_b", ReferencePrefix: "A_"},
+		{Name: "routes[2]", Application: "shop", ReferencePrefix: "SHP_"},
+	}
+	cases := []struct {
+		prov, event, ref string
+		outcome          Outcome
+		app              string
+	}{
+		{"paystack", "charge.success", "A_1", Matched, "app_a"},
+		{"flutterwave", "charge.completed", "A_1", Matched, "app_b"},
+		{"flutterwave", "charge.completed", "SHP_1", Matched, "shop"},
+		{"paystack", "charge.success", "SHP_1", Matched, "shop"},
+		{"flutterwave", "charge.success", "A_1", Unsupported, ""},
+		{"paystack", "charge.completed", "A_1", Unsupported, ""},
+		{"flutterwave", "transfer.completed", "A_1", Unsupported, ""},
+		{"stripe", "charge.success", "A_1", Unsupported, ""},
+	}
+	for _, tc := range cases {
+		d, err := NewEngine(scoped).Resolve(context.Background(), tc.prov, tc.event, paystack.Identifiers{Reference: tc.ref}, t0, nil)
+		if err != nil || d.Outcome != tc.outcome || d.Application != tc.app {
+			t.Errorf("%s %s %s: got %v %q %v, want %v %q", tc.prov, tc.event, tc.ref, d.Outcome, d.Application, err, tc.outcome, tc.app)
+		}
+	}
+	// The dedicated_nuban hint is Paystack-specific.
+	d, _ := NewEngine(nil).Resolve(context.Background(), "flutterwave", "charge.completed", paystack.Identifiers{Reference: "x", Channel: "dedicated_nuban"}, t0, nil)
+	if strings.Contains(d.Reason, "dedicated_nuban") {
+		t.Errorf("flutterwave got paystack hint: %q", d.Reason)
+	}
+}
+
 func TestResolveLookupError(t *testing.T) {
-	_, err := NewEngine(nil).Resolve(context.Background(), "charge.success", paystack.Identifiers{Reference: "X"}, t0, errLookup{})
+	_, err := NewEngine(nil).Resolve(context.Background(), "paystack", "charge.success", paystack.Identifiers{Reference: "X"}, t0, errLookup{})
 	if err == nil {
 		t.Fatal("lookup errors must propagate so the webhook is not acknowledged")
 	}

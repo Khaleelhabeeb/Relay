@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/khaleelhabeeb
 # Static binary on distroless: no shell, no package manager, runs as non-root.
 FROM gcr.io/distroless/static-debian12:nonroot
 LABEL org.opencontainers.image.title="Relay" \
-      org.opencontainers.image.description="Self-hosted Paystack webhook router: one account, many applications" \
+      org.opencontainers.image.description="Self-hosted Paystack and Flutterwave webhook router: one account, many applications" \
       org.opencontainers.image.source="https://github.com/khaleelhabeeb/relay" \
       org.opencontainers.image.documentation="https://github.com/khaleelhabeeb/relay#readme" \
       org.opencontainers.image.licenses="MIT"

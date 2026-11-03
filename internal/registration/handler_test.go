@@ -62,6 +62,8 @@ func newEnv(t *testing.T) *env {
 		"app_b":    {RegistrationToken: tokenB},
 		"no_token": {},
 	}}
+	cfg.Providers.Paystack = &config.PaystackConfig{}
+	cfg.Providers.Flutterwave = &config.FlutterwaveConfig{}
 	rp := &reprocess.Reprocessor{Store: st, Engine: engine, Logger: logger, Now: clk.Now}
 	h := NewHandler(cfg, st, rp, logger)
 	h.now = clk.Now
@@ -184,6 +186,7 @@ func TestValidation(t *testing.T) {
 		code       string
 	}{
 		{"bad provider", `{"provider":"stripe","type":"transaction_reference","value":"X"}`, 422, "validation_failed"},
+		{"dva on flutterwave", `{"provider":"flutterwave","type":"dedicated_account","bank":"b","account_number":"1"}`, 422, "validation_failed"},
 		{"bad type", `{"provider":"paystack","type":"customer","value":"X"}`, 422, "validation_failed"},
 		{"empty value", refBody(""), 422, "validation_failed"},
 		{"whitespace in value", refBody("SCH 1"), 422, "validation_failed"},
