@@ -62,6 +62,9 @@ First release: a self-hosted Paystack webhook router.
   - Optional source-IP allowlist that is aware of trusted proxies.
   - Concurrency cap on inbound webhooks (excess get `503` with `Retry-After`).
   - The database file is created owner-only.
+  - Provider signature checks fail closed: `paystack.Verify` and `flutterwave.Verify` return
+    `ErrMissingSecret` for an empty secret, and `relay.New` rejects a built-in adapter passed to
+    `WithProvider` without its secret.
   - Fuzz tests, and a chaos test that sends SIGKILL during ingest and delivery.
 - **Packaging.** Static binaries (linux and darwin, amd64 and arm64), a distroless non-root
   Docker image, a docker-compose demo, and docs.

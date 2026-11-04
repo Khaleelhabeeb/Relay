@@ -20,6 +20,9 @@ const (
 var (
 	ErrMissingSignature = errors.New("flutterwave: missing signature")
 	ErrInvalidSignature = errors.New("flutterwave: invalid signature")
+	// ErrMissingSecret means Verify was given no secret hash. An HMAC under
+	// an empty key is computable by anyone, so nothing is accepted.
+	ErrMissingSecret = errors.New("flutterwave: secret hash is not configured")
 )
 
 // Sign returns the v4 signature Flutterwave would send for body.
@@ -32,8 +35,12 @@ func Sign(secret string, body []byte) string {
 // Verify accepts the request if either header proves knowledge of the
 // secret hash: a v4 signature over the exact raw body, or a v3 verif-hash
 // equal to the secret. Both comparisons are constant time. Accepting either
-// is no weaker than accepting verif-hash alone, which v3 accounts send.
+// is no weaker than accepting verif-hash alone, which v3 accounts send. An
+// empty secret rejects every request with ErrMissingSecret.
 func Verify(secret string, body []byte, signature, verifHash string) error {
+	if secret == "" {
+		return ErrMissingSecret
+	}
 	signature, verifHash = strings.TrimSpace(signature), strings.TrimSpace(verifHash)
 	if signature == "" && verifHash == "" {
 		return ErrMissingSignature

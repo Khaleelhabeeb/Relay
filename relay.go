@@ -51,6 +51,8 @@ import (
 	"github.com/khaleelhabeeb/relay/internal/server"
 	"github.com/khaleelhabeeb/relay/internal/store"
 	"github.com/khaleelhabeeb/relay/provider"
+	"github.com/khaleelhabeeb/relay/provider/flutterwave"
+	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
 
 // Errors returned by Relay. Compare with errors.Is.
@@ -123,6 +125,9 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Relay, error
 		if a == nil || !providerNamePattern.MatchString(a.Name()) {
 			return nil, fmt.Errorf("relay: invalid provider name %q (want %s)", nameOf(a), providerNamePattern)
 		}
+		if missingSecret(a) {
+			return nil, fmt.Errorf("relay: provider %q added with WithProvider has an empty secret", a.Name())
+		}
 		if i := slices.IndexFunc(adapters, func(b provider.Adapter) bool { return b.Name() == a.Name() }); i >= 0 {
 			adapters[i] = a
 			continue
@@ -188,6 +193,23 @@ func nameOf(a provider.Adapter) string {
 		return "<nil>"
 	}
 	return a.Name()
+}
+
+// missingSecret reports a built-in adapter without its secret, e.g. one
+// built from an unset environment variable. Its Verify would reject every
+// webhook; failing here surfaces the mistake at startup instead.
+func missingSecret(a provider.Adapter) bool {
+	switch a := a.(type) {
+	case paystack.Adapter:
+		return a.Secret == ""
+	case *paystack.Adapter:
+		return a.Secret == ""
+	case flutterwave.Adapter:
+		return a.SecretHash == ""
+	case *flutterwave.Adapter:
+		return a.SecretHash == ""
+	}
+	return false
 }
 
 func logWarnings(cfg *config.Config, logger *slog.Logger) {
