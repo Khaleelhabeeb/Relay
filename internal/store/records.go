@@ -83,6 +83,73 @@ func (t *Tx) EventIDByDedupKey(ctx context.Context, provider, key string) (strin
 	return id, err == nil, err
 }
 
+// StoredIdentity is the stored event a duplicate webhook is compared with.
+type StoredIdentity struct {
+	ID               string
+	Reference        string
+	DedicatedAccount string
+}
+
+// IdentityByDedupKey returns the already-stored event with key, if any.
+func (t *Tx) IdentityByDedupKey(ctx context.Context, provider, key string) (StoredIdentity, bool, error) {
+	var (
+		s        StoredIdentity
+		ref, dva sql.NullString
+	)
+	err := t.tx.QueryRowContext(ctx, `SELECT id, reference, dedicated_account FROM events WHERE provider = ? AND dedup_key = ?`,
+		provider, key).Scan(&s.ID, &ref, &dva)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StoredIdentity{}, false, nil
+	}
+	s.Reference, s.DedicatedAccount = ref.String, dva.String
+	return s, err == nil, err
+}
+
+// DedupConflict is a webhook that shares an event's dedup key but not its
+// ownership identifiers.
+type DedupConflict struct {
+	ID               string    `json:"id"`
+	EventID          string    `json:"event_id"`
+	Reference        string    `json:"reference,omitempty"`
+	DedicatedAccount string    `json:"dedicated_account,omitempty"`
+	RawPayload       []byte    `json:"-"`
+	PayloadSHA256    string    `json:"payload_sha256"`
+	ReceivedAt       time.Time `json:"received_at"`
+}
+
+// RecordDedupConflict keeps a conflicting duplicate for operator review.
+func (t *Tx) RecordDedupConflict(ctx context.Context, c *DedupConflict) error {
+	_, err := t.tx.ExecContext(ctx, `INSERT INTO dedup_conflicts
+		(id, event_id, reference, dedicated_account, raw_payload, payload_sha256, received_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.EventID, nullString(c.Reference), nullString(c.DedicatedAccount), c.RawPayload, c.PayloadSHA256, ms(c.ReceivedAt))
+	return err
+}
+
+// DedupConflictsForEvent lists an event's conflicting duplicates, oldest first.
+func (s *Store) DedupConflictsForEvent(ctx context.Context, eventID string) ([]DedupConflict, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT id, event_id, reference, dedicated_account, raw_payload, payload_sha256, received_at
+		FROM dedup_conflicts WHERE event_id = ? ORDER BY received_at, id`, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DedupConflict
+	for rows.Next() {
+		var (
+			c        DedupConflict
+			ref, dva sql.NullString
+			received int64
+		)
+		if err := rows.Scan(&c.ID, &c.EventID, &ref, &dva, &c.RawPayload, &c.PayloadSHA256, &received); err != nil {
+			return nil, err
+		}
+		c.Reference, c.DedicatedAccount, c.ReceivedAt = ref.String, dva.String, fromMS(received)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // RecordDuplicate counts a repeated webhook for an existing event.
 func (t *Tx) RecordDuplicate(ctx context.Context, eventID string, seenAt time.Time) error {
 	_, err := t.tx.ExecContext(ctx,

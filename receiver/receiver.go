@@ -12,6 +12,11 @@
 //		return fulfil(ctx, d)
 //	}))
 //
+// A verified delivery proves it came from Relay, not that the payment
+// happened: any application sharing the provider account can send Relay a
+// correctly signed webhook. Confirm the transaction with the provider
+// before granting value.
+//
 // This package depends only on the standard library and Relay's own
 // signing code; it does not open a database or start workers.
 package receiver

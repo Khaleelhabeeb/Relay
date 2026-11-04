@@ -32,6 +32,10 @@ type Acceptor interface {
 	Accept(ctx context.Context, a *Accepted) error
 }
 
+// confirmTimeout bounds a provider API confirmation, leaving room within the
+// server's write timeout to store the event.
+const confirmTimeout = 8 * time.Second
+
 type Handler struct {
 	Adapter      provider.Adapter
 	MaxBodyBytes int64
@@ -111,6 +115,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ids := h.Adapter.ExtractIdentifiers(evt)
+	if c, ok := h.Adapter.(provider.Confirmer); ok && h.Adapter.Routes(evt.Type) {
+		cctx, cancel := context.WithTimeout(r.Context(), confirmTimeout)
+		err := c.Confirm(cctx, evt, ids)
+		cancel()
+		switch {
+		case errors.Is(err, provider.ErrNotConfirmed):
+			// A valid signature the provider's API disowns: forged by a
+			// holder of the account secret. Never stored or delivered.
+			log.Error("webhook rejected: provider API does not confirm the event", "event_type", evt.Type,
+				"reference", ids.Reference, "transaction_id", ids.TransactionID, "error", err)
+			h.Metrics.Webhook(name, "not_confirmed")
+			apierr.Write(w, http.StatusUnprocessableEntity, apierr.NotConfirmed, "event does not match the provider's record")
+			return
+		case err != nil:
+			log.Error("webhook refused: provider API confirmation failed", "event_type", evt.Type, "error", err)
+			h.Metrics.Webhook(name, "confirm_error")
+			apierr.Write(w, http.StatusServiceUnavailable, apierr.ConfirmUnavailable, "event could not be confirmed, retry later")
+			return
+		}
+	}
 	a := &Accepted{Event: evt, Identifiers: ids, DedupKey: h.Adapter.DedupKey(evt, ids), ReceivedAt: h.now()}
 	log = log.With("event_type", evt.Type, "dedup_key", a.DedupKey)
 

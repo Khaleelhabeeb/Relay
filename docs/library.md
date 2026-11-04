@@ -96,7 +96,8 @@ case errors.Is(err, relay.ErrInvalid):
 case err != nil:
 	// storage error
 }
-// routed counts unresolved events from the last 72 hours that this registration just delivered.
+// routed counts earlier unresolved events this registration just routed: from the last 72 hours
+// inside the application's reference_prefixes, otherwise from at most 15 minutes before it.
 ```
 
 The same rules apply as for the [HTTP API](../README.md#registering-ownership). References never

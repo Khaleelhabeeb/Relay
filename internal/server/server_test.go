@@ -19,6 +19,7 @@ import (
 	"github.com/khaleelhabeeb/relay/config"
 	"github.com/khaleelhabeeb/relay/internal/ingest"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
+	"github.com/khaleelhabeeb/relay/provider"
 	"github.com/khaleelhabeeb/relay/provider/flutterwave"
 	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
@@ -303,5 +304,46 @@ func TestReadiness(t *testing.T) {
 	}
 	if get(func(context.Context) error { return errors.New("disk full") }) != http.StatusServiceUnavailable {
 		t.Error("failing store must not be ready")
+	}
+}
+
+// With confirm_with_api, a correctly signed webhook that Paystack's API
+// disowns is refused and never reaches the acceptor; an API outage is a 503
+// so Paystack retries; unrouted event types are not looked up.
+func TestWebhookConfirmWithAPI(t *testing.T) {
+	apiStatus, calls := http.StatusOK, 0
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(apiStatus)
+		_, _ = w.Write([]byte(`{"status":true,"data":{"id":77,"reference":"APPA_1","status":"success","amount":500,"currency":"NGN"}}`))
+	}))
+	t.Cleanup(api.Close)
+	rec := &recorder{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ad := paystack.Adapter{Secret: secret, ConfirmWithAPI: true, APIBaseURL: api.URL}
+	ts := httptest.NewServer(New(testConfig(), logger, Deps{Acceptor: rec, Adapters: []provider.Adapter{ad}}).Handler())
+	t.Cleanup(ts.Close)
+	send := func(data string) (int, string) {
+		body := []byte(`{"event":"charge.success","data":` + data + `}`)
+		return post(t, ts.URL, body, paystack.Sign(secret, body))
+	}
+
+	if s, code := send(`{"id":77,"reference":"APPA_1","status":"success","amount":500,"currency":"NGN"}`); s != http.StatusOK {
+		t.Fatalf("genuine: %d %s", s, code)
+	}
+	if s, code := send(`{"id":77,"reference":"APPA_1","status":"success","amount":90000,"currency":"NGN"}`); s != http.StatusUnprocessableEntity || code != "not_confirmed" {
+		t.Fatalf("forged amount: %d %s", s, code)
+	}
+	apiStatus = http.StatusInternalServerError
+	if s, code := send(`{"id":77,"reference":"APPA_1","status":"success","amount":500,"currency":"NGN"}`); s != http.StatusServiceUnavailable || code != "confirmation_unavailable" {
+		t.Fatalf("API outage: %d %s", s, code)
+	}
+	before := calls
+	body := fixture(t, "transfer_success.json")
+	if s, code := post(t, ts.URL, body, paystack.Sign(secret, body)); s != http.StatusOK || calls != before {
+		t.Fatalf("unrouted type: %d %s, API calls %d→%d", s, code, before, calls)
+	}
+	if len(rec.got) != 2 {
+		t.Fatalf("acceptor got %d events, want the genuine charge and the transfer", len(rec.got))
 	}
 }

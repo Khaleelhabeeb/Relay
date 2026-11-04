@@ -156,11 +156,40 @@ func TestOwnersAt(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var got []string
-			for _, r := range OwnersAt(tc.regs, t0) {
+			for _, r := range OwnersAt(tc.regs, t0, nil) {
 				got = append(got, r.ID)
 			}
 			if strings.Join(got, ",") != tc.want {
 				t.Fatalf("got %v, want %q", got, tc.want)
+			}
+		})
+	}
+	late := []Registration{active("a", "x", after)}
+	if got := OwnersAt(late, t0, func(Registration) bool { return false }); len(got) != 0 {
+		t.Errorf("mayPredate false: got %v, want no owner", got)
+	}
+}
+
+// A registration may claim an earlier event only within RetroactiveGrace,
+// unless the reference is inside the registering application's namespace.
+func TestResolveRetroactiveGrace(t *testing.T) {
+	e := NewEngine(nil).WithNamespaces(map[string][]string{"app_a": {"APPA_"}})
+	cases := []struct {
+		name, app, ref string
+		lead           time.Duration // registration created this long after the event
+		want           Outcome
+	}{
+		{"within grace", "app_b", "ORDER_1", RetroactiveGrace, Matched},
+		{"past grace", "app_b", "ORDER_1", RetroactiveGrace + time.Second, Unresolved},
+		{"own namespace, past grace", "app_a", "APPA_1", 48 * time.Hour, Matched},
+		{"namespaced app, other reference", "app_a", "ORDER_1", time.Hour, Unresolved},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lookup := fakeLookup{IdentifierReference + "|" + tc.ref: {active("r", tc.app, t0.Add(tc.lead))}}
+			d, err := e.Resolve(context.Background(), "paystack", "charge.success", paystack.Identifiers{Reference: tc.ref}, t0, lookup)
+			if err != nil || d.Outcome != tc.want {
+				t.Fatalf("got %s (%v), want %s", d.Outcome, err, tc.want)
 			}
 		})
 	}

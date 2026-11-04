@@ -121,6 +121,10 @@ const (
 type PaystackConfig struct {
 	SecretEnv  string   `yaml:"secret_env"`
 	AllowedIPs []string `yaml:"allowed_ips"`
+	// ConfirmWithAPI checks each routed event with Paystack's verify API
+	// before accepting it, so a webhook forged with the shared secret key
+	// is refused.
+	ConfirmWithAPI bool `yaml:"confirm_with_api"`
 
 	Secret string `yaml:"-"`
 }
@@ -130,8 +134,13 @@ type PaystackConfig struct {
 type FlutterwaveConfig struct {
 	SecretHashEnv string   `yaml:"secret_hash_env"`
 	AllowedIPs    []string `yaml:"allowed_ips"`
+	// ConfirmWithAPI checks each routed event with Flutterwave's verify API
+	// before accepting it. It needs the account's secret key (SecretKeyEnv).
+	ConfirmWithAPI bool   `yaml:"confirm_with_api"`
+	SecretKeyEnv   string `yaml:"secret_key_env"`
 
 	SecretHash string `yaml:"-"`
+	SecretKey  string `yaml:"-"`
 }
 
 type ApplicationConfig struct {
@@ -140,6 +149,12 @@ type ApplicationConfig struct {
 	PreviousSigningSecretEnv string `yaml:"previous_signing_secret_env"`
 	RegistrationTokenEnv     string `yaml:"registration_token_env"`
 	PayloadFormat            string `yaml:"payload_format"`
+	// ReferencePrefixes is the application's reference namespace. When set,
+	// it may register only references starting with one of them, and no
+	// other application may register any. Registrations inside it may also
+	// claim webhooks that arrived up to 72 hours earlier; outside it, only
+	// ones that arrived shortly before (see routing.RetroactiveGrace).
+	ReferencePrefixes []string `yaml:"reference_prefixes"`
 
 	ID                    string `yaml:"-"`
 	SigningSecret         string `yaml:"-"`
@@ -338,6 +353,9 @@ func (c *Config) resolveSecrets(env LookupEnv) []error {
 	}
 	if p := c.Providers.Flutterwave; p != nil {
 		p.SecretHash = get("providers.flutterwave.secret_hash_env", p.SecretHashEnv, true)
+		if p.ConfirmWithAPI || p.SecretKeyEnv != "" {
+			p.SecretKey = get("providers.flutterwave.secret_key_env", p.SecretKeyEnv, p.ConfirmWithAPI)
+		}
 	}
 	for _, id := range c.sortedAppIDs() {
 		app := c.Applications[id]
@@ -360,6 +378,9 @@ func (c *Config) missingSecrets() []error {
 	}
 	if p := c.Providers.Flutterwave; p != nil && p.SecretHash == "" {
 		errs = append(errs, errors.New("providers.flutterwave: SecretHash is required"))
+	}
+	if p := c.Providers.Flutterwave; p != nil && p.ConfirmWithAPI && p.SecretKey == "" {
+		errs = append(errs, errors.New("providers.flutterwave: SecretKey is required with ConfirmWithAPI"))
 	}
 	for _, id := range c.sortedAppIDs() {
 		if app := c.Applications[id]; app != nil && app.SigningSecret == "" {

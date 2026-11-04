@@ -65,6 +65,21 @@ First release: a self-hosted Paystack webhook router.
   - Provider signature checks fail closed: `paystack.Verify` and `flutterwave.Verify` return
     `ErrMissingSecret` for an empty secret, and `relay.New` rejects a built-in adapter passed to
     `WithProvider` without its secret.
+  - Optional `confirm_with_api` for each provider: before accepting a routed event, Relay checks it
+    against the provider's verify API (Paystack `GET /transaction/verify/:reference`,
+    Flutterwave `GET /v3/transactions/:id/verify`, which needs the new
+    `providers.flutterwave.secret_key_env`). Mismatches get `422 not_confirmed` and are never
+    stored, and an unreachable API gets `503`. Adapters can implement `provider.Confirmer`.
+  - A duplicate webhook whose reference or virtual account differs from the stored event is kept
+    in `dedup_conflicts` (migration 0003). It is logged as an error, counted as
+    `result="dedup_conflict"`, and shown by `relay events inspect`.
+  - Per-application `reference_prefixes` namespaces. A registration inside another application's
+    namespace, or under a `reference_prefix` route to another application, is refused with `409`.
+    It no longer becomes `ambiguous` later. An application with a namespace can register only
+    inside it.
+  - A registration can claim webhooks that arrived before it only within its own namespace (72 h).
+    Otherwise, including for virtual accounts, it can claim only ones from up to 15 minutes before
+    it (`routing.RetroactiveGrace`).
   - Fuzz tests, and a chaos test that sends SIGKILL during ingest and delivery.
 - **Packaging.** Static binaries (linux and darwin, amd64 and arm64), a distroless non-root
   Docker image, a docker-compose demo, and docs.

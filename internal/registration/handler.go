@@ -214,6 +214,17 @@ func (h *Handler) Register(ctx context.Context, app string, req CreateRequest) (
 		return nil, false, 0, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	log := h.logger.With("application", app, "provider", req.Provider, "type", req.Type)
+	if req.Type == routing.IdentifierReference {
+		engine := h.reprocessor.Engine
+		if engine.HasNamespace(app) && !engine.InNamespace(app, value) {
+			log.Warn("registration rejected: reference outside the application's reference_prefixes")
+			return nil, false, 0, fmt.Errorf("%w: value must start with one of the application's reference_prefixes", ErrInvalid)
+		}
+		if owner, why := engine.ReferenceOwner(req.Provider, value, app); owner != "" {
+			log.Warn("registration rejected: reference belongs to another application", "owner", owner, "why", why)
+			return nil, false, 0, fmt.Errorf("%w: %s", store.ErrRegistrationConflict, why)
+		}
+	}
 	reg, created, err = h.store.CreateRegistration(ctx, req.Provider, req.Type, value, app, h.now())
 	switch {
 	case errors.Is(err, store.ErrRegistrationConflict):
@@ -233,6 +244,9 @@ func (h *Handler) Register(ctx context.Context, app string, req CreateRequest) (
 			log.Error("reprocessing after registration failed", "registration_id", reg.ID, "error", err)
 		}
 		routed = res.Matched
+		if routed > 0 {
+			log.Info("registration routed earlier webhooks", "registration_id", reg.ID, "routed_events", routed)
+		}
 	}
 	return reg, created, routed, nil
 }
@@ -258,7 +272,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, app string) {
 		apierr.Write(w, http.StatusUnprocessableEntity, apierr.ValidationFailed, strings.TrimPrefix(err.Error(), ErrInvalid.Error()+": "))
 		return
 	case errors.Is(err, store.ErrRegistrationConflict):
-		apierr.Write(w, http.StatusConflict, apierr.RegistrationConflict, "identifier is registered to another application")
+		apierr.Write(w, http.StatusConflict, apierr.RegistrationConflict, "identifier belongs to another application")
 		return
 	case err != nil:
 		apierr.Write(w, http.StatusServiceUnavailable, apierr.StorageUnavailable, "registration could not be stored")

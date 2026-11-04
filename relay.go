@@ -158,7 +158,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Relay, error
 	}
 	dispatcher := delivery.NewDispatcher(cfg, st, logger, o.userAgent)
 	dispatcher.Metrics = m
-	engine := routing.NewEngine(routing.RulesFromConfig(cfg.Routes), adapters...)
+	engine := routing.NewEngine(routing.RulesFromConfig(cfg.Routes), adapters...).WithNamespaces(routing.NamespacesFromConfig(cfg.Applications))
 	acceptor := &ingest.StoreAcceptor{Store: st, Engine: engine, Logger: logger, Metrics: m, OnRouted: dispatcher.Nudge}
 	reprocessor := &reprocess.Reprocessor{Store: st, Engine: engine, Logger: logger, Metrics: m, OnRouted: dispatcher.Nudge}
 	reg := registration.NewHandler(cfg, st, reprocessor, logger)
@@ -205,9 +205,9 @@ func missingSecret(a provider.Adapter) bool {
 	case *paystack.Adapter:
 		return a.Secret == ""
 	case flutterwave.Adapter:
-		return a.SecretHash == ""
+		return a.SecretHash == "" || (a.ConfirmWithAPI && a.SecretKey == "")
 	case *flutterwave.Adapter:
-		return a.SecretHash == ""
+		return a.SecretHash == "" || (a.ConfirmWithAPI && a.SecretKey == "")
 	}
 	return false
 }
@@ -222,6 +222,14 @@ func logWarnings(cfg *config.Config, logger *slog.Logger) {
 			"trusted_proxies", len(cfg.Server.TrustedProxies))
 		if len(cfg.Server.TrustedProxies) == 0 {
 			logger.Warn("allowed_ips is set without server.trusted_proxies: behind a reverse proxy every webhook will appear to come from the proxy and be rejected", "provider", name)
+		}
+	}
+	if len(cfg.Applications) > 1 {
+		if p := cfg.Providers.Paystack; p != nil && !p.ConfirmWithAPI {
+			logger.Warn("providers.paystack.confirm_with_api is off: any application holding the Paystack secret key can forge webhooks that Relay delivers to the others")
+		}
+		if p := cfg.Providers.Flutterwave; p != nil && !p.ConfirmWithAPI {
+			logger.Warn("providers.flutterwave.confirm_with_api is off: anyone who knows the secret hash can forge webhooks that Relay delivers")
 		}
 	}
 	if cfg.Delivery.AllowInsecureLocal {

@@ -10,6 +10,11 @@ import (
 // rejects every signature.
 type Adapter struct {
 	Secret string // Paystack secret key
+	// ConfirmWithAPI makes Confirm check each routed event with Paystack's
+	// verify API before Relay accepts it (see provider.Confirmer).
+	ConfirmWithAPI bool
+	APIBaseURL     string       // default DefaultAPIBaseURL
+	HTTPClient     *http.Client // default: a client with a 10s timeout
 }
 
 func (Adapter) Name() string { return provider.Paystack }

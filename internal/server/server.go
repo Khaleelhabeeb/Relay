@@ -113,10 +113,10 @@ func registerWebhooks(mux *http.ServeMux, cfg *config.Config, logger *slog.Logge
 func Adapters(cfg *config.Config) []provider.Adapter {
 	var out []provider.Adapter
 	if p := cfg.Providers.Paystack; p != nil {
-		out = append(out, paystack.Adapter{Secret: p.Secret})
+		out = append(out, paystack.Adapter{Secret: p.Secret, ConfirmWithAPI: p.ConfirmWithAPI})
 	}
 	if p := cfg.Providers.Flutterwave; p != nil {
-		out = append(out, flutterwave.Adapter{SecretHash: p.SecretHash})
+		out = append(out, flutterwave.Adapter{SecretHash: p.SecretHash, ConfirmWithAPI: p.ConfirmWithAPI, SecretKey: p.SecretKey})
 	}
 	return out
 }

@@ -10,6 +10,7 @@ const (
 	Attempt         = "att"
 	Registration    = "reg"
 	RoutingDecision = "rtd"
+	DedupConflict   = "ddc"
 )
 
 // New returns prefix + "_" + a new ULID. Safe for concurrent use.
