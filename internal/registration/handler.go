@@ -185,8 +185,8 @@ func normalize(req CreateRequest, providers []string) (string, error) {
 		}
 		return v, nil
 	case routing.IdentifierDedicatedAccount:
-		if req.Provider != provider.Paystack {
-			return "", errors.New("dedicated_account applies only to paystack")
+		if req.Provider != provider.Paystack && req.Provider != provider.Monnify {
+			return "", errors.New("dedicated_account applies only to paystack and monnify")
 		}
 		if req.Value != "" {
 			return "", errors.New("use bank and account_number for dedicated_account, not value")

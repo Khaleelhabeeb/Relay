@@ -16,6 +16,7 @@ import (
 	"github.com/khaleelhabeeb/relay/config"
 	"github.com/khaleelhabeeb/relay/provider"
 	"github.com/khaleelhabeeb/relay/provider/flutterwave"
+	"github.com/khaleelhabeeb/relay/provider/monnify"
 	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
 
@@ -97,7 +98,7 @@ type Engine struct {
 // route and re-read stored events, not to verify webhooks.
 func NewEngine(rules []Rule, adapters ...provider.Adapter) *Engine {
 	if len(adapters) == 0 {
-		adapters = []provider.Adapter{paystack.Adapter{}, flutterwave.Adapter{}}
+		adapters = []provider.Adapter{paystack.Adapter{}, flutterwave.Adapter{}, monnify.Adapter{}}
 	}
 	e := &Engine{rules: rules, adapters: make(map[string]provider.Adapter, len(adapters))}
 	for _, a := range adapters {

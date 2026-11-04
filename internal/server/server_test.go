@@ -21,6 +21,7 @@ import (
 	"github.com/khaleelhabeeb/relay/internal/metrics"
 	"github.com/khaleelhabeeb/relay/provider"
 	"github.com/khaleelhabeeb/relay/provider/flutterwave"
+	"github.com/khaleelhabeeb/relay/provider/monnify"
 	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
 
@@ -45,6 +46,7 @@ func testConfig() *config.Config {
 	c.Server.MaxBodyBytes = 64 << 10
 	c.Providers.Paystack = &config.PaystackConfig{Secret: secret}
 	c.Providers.Flutterwave = &config.FlutterwaveConfig{SecretHash: flwSecret}
+	c.Providers.Monnify = &config.MonnifyConfig{SecretKey: mnfySecret}
 	return c
 }
 
@@ -164,6 +166,58 @@ func TestFlutterwaveWebhook(t *testing.T) {
 	defer ps.Close()
 	if s := send(ps, "/webhooks/flutterwave", map[string]string{"verif-hash": flwSecret}); s != http.StatusNotFound && s != http.StatusMethodNotAllowed {
 		t.Fatalf("unconfigured provider: status %d", s)
+	}
+}
+
+const mnfySecret = "sk_test_monnify_server_secret"
+
+func TestMonnifyWebhook(t *testing.T) {
+	read := func(name string) []byte {
+		b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "monnify", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	send := func(ts *httptest.Server, body []byte, sig string) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/webhooks/monnify", bytes.NewReader(body))
+		if sig != "" {
+			req.Header.Set("monnify-signature", sig)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	rec := &recorder{}
+	ts := newTestServer(t, rec)
+	card, dva := read("successful_transaction_card.json"), read("successful_transaction_reserved_account.json")
+	for _, body := range [][]byte{card, dva} {
+		if s := send(ts, body, monnify.Sign(mnfySecret, body)); s != http.StatusOK {
+			t.Fatalf("signed: status %d", s)
+		}
+	}
+	for name, sig := range map[string]string{
+		"unsigned":            "",
+		"wrong secret":        monnify.Sign("other", card),
+		"paystack secret key": monnify.Sign(secret, card),
+	} {
+		if s := send(ts, card, sig); s != http.StatusUnauthorized {
+			t.Errorf("%s: status %d, want 401", name, s)
+		}
+	}
+	if len(rec.got) != 2 {
+		t.Fatalf("acceptor got %d events, want 2", len(rec.got))
+	}
+	if a := rec.got[0]; a.Event.Provider != "monnify" || a.Identifiers.Reference != "APPA_616626414629" ||
+		a.DedupKey != "SUCCESSFUL_TRANSACTION:MNFY|04|20261102191704|000101:paid" {
+		t.Fatalf("unexpected accepted event: %+v", a)
+	}
+	if a := rec.got[1]; a.Identifiers.Reference != "APPB_CUST_1636106097661" ||
+		a.Identifiers.DedicatedAccount == nil || a.Identifiers.DedicatedAccount.Key() != "sterling bank:6000140770" {
+		t.Fatalf("reserved account identifiers: %+v", a.Identifiers)
 	}
 }
 

@@ -12,6 +12,8 @@ func testEnv(overrides map[string]string) LookupEnv {
 		"PAYSTACK_SECRET_KEY":        "sk_test_xxx",
 		"FLW_SECRET_HASH":            "flw_hash_xxx",
 		"FLUTTERWAVE_SECRET_HASH":    "flw_hash_xxx",
+		"MONNIFY_SECRET_KEY":         "sk_test_monnify_xxx",
+		"MONNIFY_API_KEY":            "MK_TEST_xxx",
 		"APP_A_RELAY_SIGNING_SECRET": strings.Repeat("a", 32),
 		"APP_A_RELAY_API_TOKEN":      strings.Repeat("b", 32),
 		"APP_B_RELAY_SIGNING_SECRET": strings.Repeat("c", 32),
@@ -43,6 +45,13 @@ applications:
 `
 
 var bothProviders = strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}, flutterwave: {secret_hash_env: FLW_SECRET_HASH}}", 1)
+
+var withMonnify = strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}, monnify: {secret_key_env: MONNIFY_SECRET_KEY}}", 1)
+
+// monnify returns withMonnify with the monnify block's fields replaced.
+func monnify(fields string) string {
+	return strings.Replace(withMonnify, "monnify: {secret_key_env: MONNIFY_SECRET_KEY}", "monnify: {secret_key_env: MONNIFY_SECRET_KEY, "+fields+"}", 1)
+}
 
 func loadYAML(t *testing.T, yaml string, env LookupEnv) (*Config, error) {
 	t.Helper()
@@ -126,6 +135,14 @@ func TestValidationErrors(t *testing.T) {
 		{"blank namespace prefix", strings.Replace(base, "    payload_format: envelope\n", "    payload_format: envelope\n    reference_prefixes: [' ']\n", 1), nil, "reference_prefixes"},
 		{"flutterwave confirm without secret key", strings.Replace(bothProviders, "flutterwave: {secret_hash_env: FLW_SECRET_HASH}", "flutterwave: {secret_hash_env: FLW_SECRET_HASH, confirm_with_api: true}", 1), nil, "secret_key_env: required"},
 		{"flutterwave confirm with unset secret key", strings.Replace(bothProviders, "flutterwave: {secret_hash_env: FLW_SECRET_HASH}", "flutterwave: {secret_hash_env: FLW_SECRET_HASH, confirm_with_api: true, secret_key_env: FLW_SECRET_KEY}", 1), nil, "FLW_SECRET_KEY is not set"},
+		{"missing monnify secret key", withMonnify, map[string]string{"MONNIFY_SECRET_KEY": ""}, "MONNIFY_SECRET_KEY is not set"},
+		{"monnify confirm without api key", monnify("confirm_with_api: true"), nil, "providers.monnify.api_key_env: required"},
+		{"monnify confirm with unset api key", monnify("confirm_with_api: true, api_key_env: NOPE"), nil, "NOPE is not set"},
+		{"monnify http api url", monnify("api_base_url: 'http://sandbox.monnify.com'"), nil, "must be an absolute https URL"},
+		{"monnify bad allowlist", monnify("allowed_ips: [nope]"), nil, "providers.monnify.allowed_ips"},
+		{"unsigned sandbox without confirm", monnify("allow_unsigned_sandbox: true, api_base_url: 'https://sandbox.monnify.com'"), nil, "requires confirm_with_api"},
+		{"unsigned sandbox against live", monnify("allow_unsigned_sandbox: true, confirm_with_api: true, api_key_env: MONNIFY_API_KEY"), nil, "never enable it against the live API"},
+		{"unsigned sandbox against lookalike", monnify("allow_unsigned_sandbox: true, confirm_with_api: true, api_key_env: MONNIFY_API_KEY, api_base_url: 'https://sandbox.monnify.com.evil.example'"), nil, "never enable it against the live API"},
 		{"unscoped route overlaps scoped", bothProviders + "routes:\n- {provider: flutterwave, application: app_a, match: {reference_prefix: A}}\n- {application: app_b, match: {reference_prefix: A}}\n", nil, "overlap"},
 	}
 	for _, tc := range cases {
@@ -147,6 +164,9 @@ func TestValidationAccepts(t *testing.T) {
 		"namespace with own route":                    strings.Replace(base, "    registration_token_env: APP_A_RELAY_API_TOKEN\n", "    registration_token_env: APP_A_RELAY_API_TOKEN\n    reference_prefixes: [APPA_]\n", 1) + "routes: [{application: app_a, match: {reference_prefix: APPA_}}]\n",
 		"confirm with api":                            strings.Replace(bothProviders, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}, flutterwave: {secret_hash_env: FLW_SECRET_HASH}}", "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY, confirm_with_api: true}, flutterwave: {secret_hash_env: FLW_SECRET_HASH, confirm_with_api: true, secret_key_env: PAYSTACK_SECRET_KEY}}", 1),
 		"flutterwave only":                            strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "providers: {flutterwave: {secret_hash_env: FLW_SECRET_HASH}}", 1),
+		"monnify":                                     withMonnify,
+		"monnify confirm with api":                    monnify("confirm_with_api: true, api_key_env: MONNIFY_API_KEY"),
+		"monnify unsigned sandbox":                    monnify("confirm_with_api: true, api_key_env: MONNIFY_API_KEY, allow_unsigned_sandbox: true, api_base_url: 'https://sandbox.monnify.com'"),
 		"insecure local opt-in":                       strings.Replace(base, "https://uni.example.com", "http://127.0.0.1:9000", 1) + "delivery: {allow_insecure_local: true}\n",
 	}
 	for name, y := range cases {
@@ -192,6 +212,11 @@ func TestValidateGoConfig(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 	c.Providers.Flutterwave.SecretHash = "h"
+	c.Providers.Monnify = &MonnifyConfig{ConfirmWithAPI: true, SecretKey: "s"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "APIKey is required") {
+		t.Fatalf("monnify without api key: %v", err)
+	}
+	c.Providers.Monnify.APIKey = "k"
 	c.Applications["app_a"].SigningSecret = strings.Repeat("s", 32)
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)

@@ -16,6 +16,11 @@ providers:
     secret_env: PAYSTACK_SECRET_KEY
   flutterwave:
     secret_hash_env: FLUTTERWAVE_SECRET_HASH   # Settings > Webhooks > Secret hash
+  monnify:
+    secret_key_env: MONNIFY_SECRET_KEY         # Developers > API Keys & Contracts > Secret key
+    # confirm_with_api: true                   # check each routed event with Monnify's API
+    # api_key_env: MONNIFY_API_KEY
+    # allowed_ips: ["35.242.133.146"]          # Monnify's published webhook IP
 
 applications:
   app_a:
@@ -32,7 +37,7 @@ applications:
     payload_format: envelope
 
 routes:
-  - application: app_a            # no provider: applies to Paystack and Flutterwave
+  - application: app_a            # no provider: applies to every provider
     match:
       reference_prefix: "APPA_"
   - provider: flutterwave          # this route applies to Flutterwave events only

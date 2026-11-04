@@ -38,6 +38,8 @@ fuzz:
 	$(GO) test -run '^$$' -fuzz '^FuzzParseAndExtract$$' -fuzztime $(FUZZTIME) ./provider/paystack
 	$(GO) test -run '^$$' -fuzz '^FuzzVerify$$' -fuzztime $(FUZZTIME) ./provider/flutterwave
 	$(GO) test -run '^$$' -fuzz '^FuzzParseAndExtract$$' -fuzztime $(FUZZTIME) ./provider/flutterwave
+	$(GO) test -run '^$$' -fuzz '^FuzzVerify$$' -fuzztime $(FUZZTIME) ./provider/monnify
+	$(GO) test -run '^$$' -fuzz '^FuzzParseAndExtract$$' -fuzztime $(FUZZTIME) ./provider/monnify
 	$(GO) test -run '^$$' -fuzz '^FuzzEnvelope$$' -fuzztime $(FUZZTIME) ./internal/delivery
 	$(GO) test -run '^$$' -fuzz '^FuzzVerifySignature$$' -fuzztime $(FUZZTIME) ./internal/delivery
 	$(GO) test -run '^$$' -fuzz '^FuzzLoad$$' -fuzztime $(FUZZTIME) ./config

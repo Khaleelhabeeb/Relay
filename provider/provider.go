@@ -1,7 +1,8 @@
 // Package provider defines the provider-neutral event model and the Adapter
 // interface that teaches Relay a payment provider's webhooks. The built-in
-// adapters live in provider/paystack and provider/flutterwave; implement
-// Adapter to add another provider and pass it to relay.WithProvider.
+// adapters live in provider/paystack, provider/flutterwave and
+// provider/monnify; implement Adapter to add another provider and pass it to
+// relay.WithProvider.
 package provider
 
 import (
@@ -18,6 +19,7 @@ import (
 const (
 	Paystack    = "paystack"
 	Flutterwave = "flutterwave"
+	Monnify     = "monnify"
 )
 
 // Event is a parsed webhook. Raw keeps the exact signed bytes, which are
