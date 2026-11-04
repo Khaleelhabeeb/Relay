@@ -18,6 +18,8 @@ import (
 	"github.com/khaleelhabeeb/relay"
 	"github.com/khaleelhabeeb/relay/config"
 	"github.com/khaleelhabeeb/relay/provider"
+	"github.com/khaleelhabeeb/relay/provider/flutterwave"
+	"github.com/khaleelhabeeb/relay/provider/paystack"
 	"github.com/khaleelhabeeb/relay/receiver"
 )
 
@@ -217,6 +219,12 @@ func TestNewRejectsBadConfig(t *testing.T) {
 	cfg = testConfig(t, "http://127.0.0.1:1", "http://127.0.0.1:2")
 	if _, err := relay.New(ctx, cfg, relay.WithProvider(badName{})); err == nil || !strings.Contains(err.Error(), "invalid provider name") {
 		t.Errorf("bad provider name: %v", err)
+	}
+	for _, a := range []provider.Adapter{paystack.Adapter{}, &paystack.Adapter{}, flutterwave.Adapter{}, &flutterwave.Adapter{}} {
+		cfg = testConfig(t, "http://127.0.0.1:1", "http://127.0.0.1:2")
+		if _, err := relay.New(ctx, cfg, relay.WithProvider(a)); err == nil || !strings.Contains(err.Error(), "empty secret") {
+			t.Errorf("%T without secret: %v", a, err)
+		}
 	}
 }
 

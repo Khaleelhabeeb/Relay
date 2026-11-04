@@ -50,6 +50,8 @@ func TestVerify(t *testing.T) {
 		{"not hex", secret, body, strings.Repeat("z", 128), ErrInvalidSignature},
 		{"truncated", secret, body, good[:64], ErrInvalidSignature},
 		{"sha256 length", secret, body, strings.Repeat("ab", 32), ErrInvalidSignature},
+		{"empty secret, empty-key signature", "", body, Sign("", body), ErrMissingSecret},
+		{"empty secret, missing header", "", body, "", ErrMissingSecret},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

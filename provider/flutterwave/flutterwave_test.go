@@ -77,6 +77,26 @@ func TestAdapterVerifyReadsHeaders(t *testing.T) {
 	}
 }
 
+// An HMAC under an empty key is computable by anyone, so the zero value
+// must not accept it.
+func TestVerifyEmptySecret(t *testing.T) {
+	body := fixture(t, "charge_completed_card.json")
+	for name, h := range map[string][2]string{
+		"empty-key v4":     {Sign("", body), ""},
+		"blank verif-hash": {"", " "},
+		"no headers":       {"", ""},
+	} {
+		if err := Verify("", body, h[0], h[1]); !errors.Is(err, ErrMissingSecret) {
+			t.Errorf("%s: got %v, want ErrMissingSecret", name, err)
+		}
+	}
+	hdr := http.Header{}
+	hdr.Set(SignatureHeader, Sign("", body))
+	if err := (Adapter{}).Verify(hdr, body); !errors.Is(err, ErrMissingSecret) {
+		t.Errorf("zero Adapter: got %v, want ErrMissingSecret", err)
+	}
+}
+
 func TestParse(t *testing.T) {
 	for _, bad := range []string{
 		`not json`,
