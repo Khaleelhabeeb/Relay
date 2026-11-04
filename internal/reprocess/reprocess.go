@@ -11,10 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/khaleelhabeeb/relay/internal/flutterwave"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
-	"github.com/khaleelhabeeb/relay/internal/paystack"
-	"github.com/khaleelhabeeb/relay/internal/provider"
 	"github.com/khaleelhabeeb/relay/internal/routing"
 	"github.com/khaleelhabeeb/relay/internal/store"
 )
@@ -22,13 +19,6 @@ import (
 // Window bounds automatic reprocessing after a registration: only events
 // received this recently are reconsidered.
 const Window = 72 * time.Hour
-
-// parsers re-read stored payloads, which were verified at ingest, so they
-// need no secrets.
-var parsers = map[string]provider.Adapter{
-	provider.Paystack:    paystack.Adapter{},
-	provider.Flutterwave: flutterwave.Adapter{},
-}
 
 type Reprocessor struct {
 	Store    *store.Store
@@ -61,9 +51,11 @@ func (r *Reprocessor) Event(ctx context.Context, eventID, decidedBy string) (rou
 		if e.RoutingStatus != routing.Unresolved || len(e.RawPayload) == 0 {
 			return nil
 		}
-		ad, ok := parsers[e.Provider]
+		// Stored payloads were verified at ingest; the engine's adapter
+		// only re-reads them.
+		ad, ok := r.Engine.Adapter(e.Provider)
 		if !ok {
-			return fmt.Errorf("reprocess: unknown provider %q", e.Provider)
+			return fmt.Errorf("reprocess: provider %q is not configured", e.Provider)
 		}
 		evt, err := ad.Parse(e.RawPayload)
 		if err != nil {

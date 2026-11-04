@@ -22,12 +22,12 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/khaleelhabeeb/relay/config"
 	"github.com/khaleelhabeeb/relay/internal/apierr"
-	"github.com/khaleelhabeeb/relay/internal/config"
-	"github.com/khaleelhabeeb/relay/internal/provider"
 	"github.com/khaleelhabeeb/relay/internal/reprocess"
 	"github.com/khaleelhabeeb/relay/internal/routing"
 	"github.com/khaleelhabeeb/relay/internal/store"
+	"github.com/khaleelhabeeb/relay/provider"
 )
 
 const (
@@ -70,7 +70,7 @@ func NewHandler(cfg *config.Config, st *store.Store, rp *reprocess.Reprocessor, 
 		ratePerSec:  defaultRatePerSec,
 		burst:       defaultBurst,
 		limiters:    map[string]*rate.Limiter{},
-		providers:   cfg.Providers.Names(),
+		providers:   rp.Engine.Providers(),
 		mux:         http.NewServeMux(),
 	}
 	for id, app := range cfg.Applications {
@@ -133,7 +133,8 @@ func (h *Handler) authed(fn func(http.ResponseWriter, *http.Request, string)) ht
 	}
 }
 
-type createRequest struct {
+// CreateRequest claims one identifier for an application.
+type CreateRequest struct {
 	Provider      string `json:"provider"`
 	Type          string `json:"type"`
 	Value         string `json:"value"`          // transaction_reference
@@ -166,7 +167,7 @@ func toJSON(r *store.Registration) registrationJSON {
 
 // normalize validates a create request against the enabled providers and
 // returns the canonical identifier value.
-func normalize(req createRequest, providers []string) (string, error) {
+func normalize(req CreateRequest, providers []string) (string, error) {
 	if !slices.Contains(providers, req.Provider) {
 		return "", fmt.Errorf("provider must be one of: %s", strings.Join(providers, ", "))
 	}
@@ -200,48 +201,77 @@ func normalize(req createRequest, providers []string) (string, error) {
 	}
 }
 
-func (h *Handler) create(w http.ResponseWriter, r *http.Request, app string) {
-	var req createRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
+// ErrInvalid wraps a validation failure in a CreateRequest.
+var ErrInvalid = errors.New("registration: invalid request")
+
+// Register claims req's identifier for app, the same way POST
+// /v1/registrations does. created is false when app already owned it. routed
+// counts earlier unresolved events the new registration routed. Errors are
+// ErrInvalid (wrapped), store.ErrRegistrationConflict, or a storage error.
+func (h *Handler) Register(ctx context.Context, app string, req CreateRequest) (reg *store.Registration, created bool, routed int, err error) {
 	value, err := normalize(req, h.providers)
 	if err != nil {
-		apierr.Write(w, http.StatusUnprocessableEntity, apierr.ValidationFailed, err.Error())
-		return
+		return nil, false, 0, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	log := h.logger.With("application", app, "provider", req.Provider, "type", req.Type)
-
-	reg, created, err := h.store.CreateRegistration(r.Context(), req.Provider, req.Type, value, app, h.now())
+	reg, created, err = h.store.CreateRegistration(ctx, req.Provider, req.Type, value, app, h.now())
 	switch {
 	case errors.Is(err, store.ErrRegistrationConflict):
 		log.Warn("registration conflict")
-		apierr.Write(w, http.StatusConflict, apierr.RegistrationConflict, "identifier is registered to another application")
-		return
+		return nil, false, 0, err
 	case err != nil:
 		log.Error("registration failed", "error", err)
-		apierr.Write(w, http.StatusServiceUnavailable, apierr.StorageUnavailable, "registration could not be stored")
-		return
+		return nil, false, 0, err
 	}
-
-	status := http.StatusOK
-	resp := struct {
-		registrationJSON
-		RoutedEvents int `json:"routed_events"`
-	}{registrationJSON: toJSON(reg)}
 	if created {
-		status = http.StatusCreated
 		log.Info("registration created", "registration_id", reg.ID)
 		// Route webhooks that arrived before this registration. Failure here
 		// leaves those events unresolved for operator reprocessing; the
 		// registration itself is already durable.
-		res, err := h.reprocessor.Identifier(context.WithoutCancel(r.Context()), req.Provider, req.Type, value, store.DecidedByRegistration)
+		res, err := h.reprocessor.Identifier(context.WithoutCancel(ctx), req.Provider, req.Type, value, store.DecidedByRegistration)
 		if err != nil {
 			log.Error("reprocessing after registration failed", "registration_id", reg.ID, "error", err)
 		}
-		resp.RoutedEvents = res.Matched
+		routed = res.Matched
 	}
-	apierr.WriteJSON(w, status, resp)
+	return reg, created, routed, nil
+}
+
+// Deactivate ends app's registration id. It returns store.ErrNotFound for an
+// unknown id or another application's registration.
+func (h *Handler) Deactivate(ctx context.Context, app, id string) (*store.Registration, error) {
+	reg, err := h.store.DeactivateRegistration(ctx, app, id, h.now())
+	if err == nil {
+		h.logger.Info("registration deactivated", "application", app, "registration_id", reg.ID)
+	}
+	return reg, err
+}
+
+func (h *Handler) create(w http.ResponseWriter, r *http.Request, app string) {
+	var req CreateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	reg, created, routed, err := h.Register(r.Context(), app, req)
+	switch {
+	case errors.Is(err, ErrInvalid):
+		apierr.Write(w, http.StatusUnprocessableEntity, apierr.ValidationFailed, strings.TrimPrefix(err.Error(), ErrInvalid.Error()+": "))
+		return
+	case errors.Is(err, store.ErrRegistrationConflict):
+		apierr.Write(w, http.StatusConflict, apierr.RegistrationConflict, "identifier is registered to another application")
+		return
+	case err != nil:
+		apierr.Write(w, http.StatusServiceUnavailable, apierr.StorageUnavailable, "registration could not be stored")
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	apierr.WriteJSON(w, status, struct {
+		registrationJSON
+		RoutedEvents int `json:"routed_events"`
+	}{toJSON(reg), routed})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request, app string) {
@@ -291,7 +321,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request, app string) {
 
 func (h *Handler) deactivate(w http.ResponseWriter, r *http.Request, app string) {
 	id := r.PathValue("id")
-	reg, err := h.store.DeactivateRegistration(r.Context(), app, id, h.now())
+	reg, err := h.Deactivate(r.Context(), app, id)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		// Another application's registration is indistinguishable from none.
@@ -302,7 +332,6 @@ func (h *Handler) deactivate(w http.ResponseWriter, r *http.Request, app string)
 		apierr.Write(w, http.StatusServiceUnavailable, apierr.StorageUnavailable, "registration could not be updated")
 		return
 	}
-	h.logger.Info("registration deactivated", "application", app, "registration_id", reg.ID)
 	apierr.WriteJSON(w, http.StatusOK, toJSON(reg))
 }
 

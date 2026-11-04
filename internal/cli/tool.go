@@ -12,7 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/khaleelhabeeb/relay/internal/config"
+	"github.com/khaleelhabeeb/relay/config"
 	"github.com/khaleelhabeeb/relay/internal/store"
 )
 

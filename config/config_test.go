@@ -50,7 +50,7 @@ func loadYAML(t *testing.T, yaml string, env LookupEnv) (*Config, error) {
 }
 
 func TestExampleConfigLoads(t *testing.T) {
-	f, err := os.Open("../../examples/relay.yaml")
+	f, err := os.Open("../examples/relay.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,15 +158,51 @@ func TestReportsAllErrors(t *testing.T) {
 	}
 }
 
+func TestExtraProviders(t *testing.T) {
+	y := base + "routes: [{provider: acme, application: app_a, match: {reference_prefix: A_}}]\n"
+	if _, err := loadYAML(t, y, testEnv(nil)); err == nil {
+		t.Fatal("route to an unknown provider was accepted")
+	}
+	if _, err := Load(strings.NewReader(y), testEnv(nil), "acme"); err != nil {
+		t.Fatalf("declared extra provider: %v", err)
+	}
+	if _, err := load(strings.NewReader(y), nil, nil); err != nil {
+		t.Fatalf("without secrets, routes may name any provider: %v", err)
+	}
+	noProviders := strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "", 1)
+	if _, err := Load(strings.NewReader(noProviders), testEnv(nil), "acme"); err != nil {
+		t.Fatalf("custom provider alone satisfies the provider requirement: %v", err)
+	}
+}
+
+func TestValidateGoConfig(t *testing.T) {
+	c := &Config{}
+	c.Storage.DSN = "./relay.db"
+	c.Providers.Flutterwave = &FlutterwaveConfig{}
+	c.Applications = map[string]*ApplicationConfig{"app_a": {Endpoint: "https://a.example.com/hook"}}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "SecretHash is required") || !strings.Contains(err.Error(), "applications.app_a: SigningSecret is required") {
+		t.Fatalf("got %v", err)
+	}
+	c.Providers.Flutterwave.SecretHash = "h"
+	c.Applications["app_a"].SigningSecret = strings.Repeat("s", 32)
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Applications["app_a"].ID != "app_a" || c.Applications["app_a"].PayloadFormat != PayloadOriginal || c.Delivery.MaxAttempts != DefaultMaxAttempts {
+		t.Fatalf("defaults not applied: %+v %+v", c.Applications["app_a"], c.Delivery)
+	}
+}
+
 func TestLoadWithoutSecrets(t *testing.T) {
-	c, err := load(strings.NewReader(base), nil)
+	c, err := load(strings.NewReader(base), nil, nil)
 	if err != nil {
 		t.Fatalf("structure-only load must not need secrets: %v", err)
 	}
 	if c.Providers.Paystack.Secret != "" || c.Applications["app_a"].SigningSecret != "" {
 		t.Fatal("secrets must not be resolved")
 	}
-	if _, err := load(strings.NewReader(base+"routes: [{application: nope, match: {reference_prefix: X}}]\n"), nil); err == nil {
+	if _, err := load(strings.NewReader(base+"routes: [{application: nope, match: {reference_prefix: X}}]\n"), nil, nil); err == nil {
 		t.Fatal("structural validation must still run")
 	}
 }

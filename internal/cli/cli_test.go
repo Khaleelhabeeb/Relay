@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/khaleelhabeeb/relay/internal/config"
+	"github.com/khaleelhabeeb/relay/config"
 	"github.com/khaleelhabeeb/relay/internal/ingest"
-	"github.com/khaleelhabeeb/relay/internal/paystack"
 	"github.com/khaleelhabeeb/relay/internal/routing"
 	"github.com/khaleelhabeeb/relay/internal/store"
+	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
 
 // fixture writes a config (whose secrets are deliberately NOT in the

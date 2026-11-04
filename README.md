@@ -57,6 +57,7 @@ payment provider.
 - [Operating Relay](#operating-relay)
 - [Switching Paystack or Flutterwave to Relay](#switching-paystack-or-flutterwave-to-relay)
 - [Flutterwave](#flutterwave)
+- [Use Relay as a Go library](#use-relay-as-a-go-library)
 - [Performance and reliability](#performance-and-reliability)
 - [FAQ](#faq)
 - [Development](#development)
@@ -150,6 +151,7 @@ because its metadata says `"application": "app_b"`.
 | Go toolchain (1.26+) | `go install github.com/khaleelhabeeb/relay/cmd/relay@latest` |
 | From source | `git clone https://github.com/khaleelhabeeb/relay.git && cd relay && make build`, which produces `bin/relay` |
 | Docker (build locally) | `docker build -t relay .` |
+| As a Go library | `go get github.com/khaleelhabeeb/relay@latest`; see [Use Relay as a Go library](#use-relay-as-a-go-library) |
 | Release binaries and image | Published to [GitHub Releases](https://github.com/khaleelhabeeb/relay/releases) and `ghcr.io/khaleelhabeeb/relay` for every version tag |
 
 Check the install:
@@ -439,6 +441,17 @@ export async function POST(req: Request) {
 
 <details>
 <summary><strong>Go</strong></summary>
+
+Package [`receiver`](https://pkg.go.dev/github.com/khaleelhabeeb/relay/receiver) does this for you:
+
+```go
+http.Handle("/webhooks/relay", receiver.Handler(secret, func(ctx context.Context, d *receiver.Delivery) error {
+	// deduplicate on d.EventID, then process d.Body; an error makes Relay retry
+	return nil
+}))
+```
+
+Without the dependency:
 
 ```go
 func RelayVerified(secret string, h http.Header, body []byte, now time.Time) bool {
@@ -809,6 +822,44 @@ FLUTTERWAVE_SECRET_HASH=your_hash examples/send-fixture.sh flutterwave testdata/
 Deliveries carry `X-Relay-Provider: flutterwave`, and envelopes carry `"provider":"flutterwave"`.
 As with Paystack, check a transaction with Flutterwave's Verify Transaction API before giving value.
 
+## Use Relay as a Go library
+
+`relay serve` is a thin wrapper around a Go package, so you can import Relay into your own
+program:
+
+```go
+cfg, err := config.LoadFile("relay.yaml")              // or build a config.Config in Go
+if err != nil { log.Fatal(err) }
+r, err := relay.New(ctx, cfg, relay.WithLogger(slog.Default()))
+if err != nil { log.Fatal(err) }
+defer r.Close()
+
+mux.Handle("/webhooks/", r.WebhookHandler())           // in your existing server
+go r.Run(ctx)                                          // delivery and retention workers
+
+// Claim a reference in-process when you create an order:
+_, routed, err := r.RegisterReference(ctx, "billing", "paystack", "ORDER_1001")
+```
+
+| Package | Use it to |
+|---|---|
+| `relay` | Embed Relay: `New`, `Handler`/`WebhookHandler`/`APIHandler`, `Run`/`ListenAndServe`, `RegisterReference` |
+| `relay/config` | Load `relay.yaml`, or build and `Validate` a configuration in Go |
+| `relay/receiver` | Verify Relay's deliveries in a Go application (`receiver.Handler`) |
+| `relay/provider` | The `Adapter` interface. Implement it and pass `relay.WithProvider` to add a payment provider. |
+| `relay/provider/paystack`, `relay/provider/flutterwave` | The built-in adapters, also usable on their own |
+
+The full guide is in [docs/library.md](docs/library.md): embedding, configuration in Go,
+receiving deliveries, and writing a provider adapter. The API reference, with runnable examples,
+is on [pkg.go.dev](https://pkg.go.dev/github.com/khaleelhabeeb/relay). To add a provider, implement
+[`provider.Adapter`](https://pkg.go.dev/github.com/khaleelhabeeb/relay/provider#Adapter):
+verify the exact raw body in constant time, keep parsing free of secrets, return a stable dedup
+key, and route only event types you have checked against real payloads. The built-in adapters
+in `provider/paystack` and `provider/flutterwave` are complete examples.
+
+The API is pre-1.0 and may change between minor versions; [CHANGELOG.md](CHANGELOG.md) records
+every change.
+
 ## Performance and reliability
 
 Measured on an Apple M1 laptop with durable commits, sending 3,000 unique signed webhooks:
@@ -882,10 +933,12 @@ make bench    # throughput and latency on this machine
 
 | Directory | Contents |
 |---|---|
+| `.` (package `relay`) | The embeddable library; `relay serve` runs it |
+| `config` | Configuration loading and validation (public) |
+| `provider` | Provider-neutral event model and the `Adapter` interface (public) |
+| `provider/paystack`, `provider/flutterwave` | Built-in provider adapters (public) |
+| `receiver` | Verifying Relay's deliveries in Go (public) |
 | `cmd/relay` | Entry point |
-| `internal/provider` | Provider-neutral event model and the adapter interface |
-| `internal/paystack` | Paystack signature verification, event parsing, ownership identifiers |
-| `internal/flutterwave` | Flutterwave signature verification, event parsing, ownership identifiers |
 | `internal/routing` | Ownership decisions (pure, no I/O) |
 | `internal/ingest` | The webhook endpoint |
 | `internal/store` | SQLite storage and migrations |

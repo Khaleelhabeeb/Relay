@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/khaleelhabeeb/relay/internal/provider"
+	"github.com/khaleelhabeeb/relay/provider"
 )
 
 // ChannelDedicatedNUBAN marks a bank transfer into a dedicated virtual account.

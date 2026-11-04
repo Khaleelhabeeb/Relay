@@ -11,6 +11,18 @@ registration API are versioned on their own. Breaking changes to them bump those
 First release: a self-hosted Paystack webhook router.
 
 ### Added
+- **Go library.** Relay can be embedded with `go get github.com/khaleelhabeeb/relay`. See
+  `docs/library.md`.
+  - Package `relay`: `New`, `Handler`/`WebhookHandler`/`APIHandler`, `Run`/`ListenAndServe`,
+    and in-process `RegisterReference`/`RegisterDedicatedAccount`/`Deactivate`. `relay serve` is
+    now built on it.
+  - Package `relay/config` (moved from `internal/config`): `Load`/`LoadFile`, plus
+    `Config.Validate` for configurations built in Go.
+  - Package `relay/receiver` verifies Relay's deliveries in Go (`Handler`, `Verify`, `Envelope`).
+  - Package `relay/provider`: the `Adapter` interface. Add providers with `relay.WithProvider`.
+    Adapters now declare their routed event types with `Routes`. Built-in adapters live in
+    `relay/provider/paystack` and `relay/provider/flutterwave`.
+  - `relay config validate --provider <name>` accepts routes to providers added in code.
 - **Flutterwave provider.**
   - `POST /webhooks/flutterwave` accepts `flutterwave-signature` (HMAC-SHA256) or `verif-hash`.
   - Routes `charge.completed` by `tx_ref` prefix, `meta`/`meta_data`, or a registered `tx_ref`.

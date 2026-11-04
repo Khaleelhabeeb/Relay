@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/khaleelhabeeb/relay/internal/provider"
+	"github.com/khaleelhabeeb/relay/provider"
 )
 
 const secret = "flw_relay_fixture_secret_hash"

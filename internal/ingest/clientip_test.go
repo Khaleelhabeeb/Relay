@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/khaleelhabeeb/relay/internal/config"
-	"github.com/khaleelhabeeb/relay/internal/paystack"
+	"github.com/khaleelhabeeb/relay/config"
+	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
 
 func TestIPFilter(t *testing.T) {

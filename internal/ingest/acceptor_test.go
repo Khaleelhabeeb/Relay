@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/khaleelhabeeb/relay/internal/flutterwave"
-	"github.com/khaleelhabeeb/relay/internal/paystack"
 	"github.com/khaleelhabeeb/relay/internal/routing"
 	"github.com/khaleelhabeeb/relay/internal/store"
+	"github.com/khaleelhabeeb/relay/provider/flutterwave"
+	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
 
 var testRules = []routing.Rule{

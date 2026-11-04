@@ -1,6 +1,7 @@
-// Package provider holds the provider-neutral event model shared by the
-// payment-provider adapters (paystack, flutterwave) and the pipeline that
-// verifies, routes and stores their webhooks.
+// Package provider defines the provider-neutral event model and the Adapter
+// interface that teaches Relay a payment provider's webhooks. The built-in
+// adapters live in provider/paystack and provider/flutterwave; implement
+// Adapter to add another provider and pass it to relay.WithProvider.
 package provider
 
 import (
@@ -36,18 +37,37 @@ type Identifiers struct {
 	DedicatedAccount *DedicatedAccount // set only for dedicated virtual account deposits
 }
 
-// Adapter verifies and interprets one provider's webhooks.
+// Adapter verifies and interprets one provider's webhooks. Implementations
+// must be safe for concurrent use; Relay calls them from many requests at
+// once. Parse, ExtractIdentifiers, DedupKey and Routes must not depend on
+// secrets: Relay also uses them to re-read stored events.
 type Adapter interface {
-	// Name is the provider name, e.g. "paystack".
+	// Name is the provider name: lower case letters, digits, '-' or '_'.
+	// It is stored with every event and registration, and the webhook
+	// endpoint is /webhooks/<Name>, so it must never change.
 	Name() string
 	// Verify authenticates the exact raw body. Call it before interpreting
 	// the body in any way.
 	Verify(h http.Header, body []byte) error
 	// Parse decodes a verified body into an Event with Provider set.
 	Parse(raw []byte) (*Event, error)
+	// ExtractIdentifiers reads the ownership fields. Missing or oddly typed
+	// fields are left empty; routing treats them as "no match".
 	ExtractIdentifiers(e *Event) Identifiers
 	// DedupKey is the event's deduplication identity within the provider.
+	// Deliveries of the same occurrence must yield the same key.
 	DedupKey(e *Event, ids Identifiers) string
+	// Routes reports whether events of this type are routed to an
+	// application. Return true only for types whose ownership fields you
+	// have checked against real payloads; others are stored as unsupported.
+	Routes(eventType string) bool
+}
+
+// Hinter is optionally implemented by an Adapter to explain, for operators,
+// why an event that could not be routed carried no usable identifiers. An
+// empty string falls back to Relay's generic reason.
+type Hinter interface {
+	UnresolvedHint(ids Identifiers) string
 }
 
 // DedicatedAccount identifies the receiving dedicated virtual account of a

@@ -28,7 +28,7 @@ func (c *Config) sortedAppIDs() []string {
 	return ids
 }
 
-func (c *Config) validate() []error {
+func (c *Config) validate(extraProviders []string) []error {
 	var errs []error
 	fail := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 
@@ -55,11 +55,11 @@ func (c *Config) validate() []error {
 			fail("server.trusted_proxies: %q is not an IP address or CIDR", p)
 		}
 	}
-	providers := c.Providers.Names()
+	providers := append(c.Providers.Names(), extraProviders...)
 	if len(providers) == 0 {
 		fail("providers: at least one provider (paystack or flutterwave) is required")
 	}
-	for _, name := range providers {
+	for _, name := range c.Providers.Names() {
 		for _, p := range c.Providers.AllowedIPs(name) {
 			if !validIPOrPrefix(p) {
 				fail("providers.%s.allowed_ips: %q is not an IP address or CIDR", name, p)

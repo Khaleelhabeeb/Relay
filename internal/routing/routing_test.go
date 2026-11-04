@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/khaleelhabeeb/relay/internal/paystack"
+	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
 
 var t0 = time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)

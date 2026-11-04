@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/khaleelhabeeb/relay/internal/config"
+	"github.com/khaleelhabeeb/relay/config"
 )
 
 // EnvelopeVersion is the "relay_version" of envelope payloads.

@@ -1,7 +1,9 @@
-// Package config loads and validates Relay's YAML configuration.
+// Package config loads and validates Relay's configuration.
 //
-// Secrets never appear in the file. The file names environment variables
-// (the *_env fields), and Load resolves them into the yaml:"-" fields.
+// A Config comes from YAML (LoadFile, Load) or is built in Go and checked
+// with Validate. In YAML, secrets never appear in the file: it names
+// environment variables (the *_env fields), and Load resolves them into the
+// yaml:"-" fields. In Go, set those fields directly.
 package config
 
 import (
@@ -194,39 +196,51 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 // LookupEnv matches os.LookupEnv, so tests can substitute a map.
 type LookupEnv func(key string) (string, bool)
 
-// LoadFile reads, resolves and validates the config at path using the process environment.
-func LoadFile(path string) (*Config, error) {
+// LoadFile reads, resolves and validates the config at path using the
+// process environment. extraProviders names providers added in code (see
+// relay.WithProvider) that routes may refer to.
+func LoadFile(path string, extraProviders ...string) (*Config, error) {
 	f, err := os.Open(path) // #nosec G304 -- operator-supplied config path
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return Load(f, os.LookupEnv)
+	return Load(f, os.LookupEnv, extraProviders...)
 }
 
 // LoadFileWithoutSecrets reads and validates the config at path but does
 // not resolve secrets. Operator commands use it: they need storage and
-// application names, not signing keys.
+// application names, not signing keys. Routes may name any provider, since
+// providers added in code (relay.WithProvider) are unknown here.
 func LoadFileWithoutSecrets(path string) (*Config, error) {
 	f, err := os.Open(path) // #nosec G304 -- operator-supplied config path
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return load(f, nil)
+	return load(f, nil, nil)
 }
 
 // Load parses YAML from r, applies defaults, resolves secrets from env and
 // validates the result. It returns every validation problem it finds at once.
-func Load(r io.Reader, env LookupEnv) (*Config, error) {
+// extraProviders is as for LoadFile.
+func Load(r io.Reader, env LookupEnv, extraProviders ...string) (*Config, error) {
 	if env == nil {
 		return nil, errors.New("config: env lookup is required")
 	}
-	return load(r, env)
+	return load(r, env, extraProviders)
+}
+
+// Validate applies defaults to a Config built in Go and checks it,
+// including that every secret is set. It returns every problem at once.
+// extraProviders is as for LoadFile.
+func (c *Config) Validate(extraProviders ...string) error {
+	c.applyDefaults()
+	return errors.Join(append(c.missingSecrets(), c.validate(extraProviders)...)...)
 }
 
 // load does the work of Load; a nil env skips secret resolution.
-func load(r io.Reader, env LookupEnv) (*Config, error) {
+func load(r io.Reader, env LookupEnv, extraProviders []string) (*Config, error) {
 	raw, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
@@ -244,8 +258,14 @@ func load(r io.Reader, env LookupEnv) (*Config, error) {
 	var resolveErrs []error
 	if env != nil {
 		resolveErrs = c.resolveSecrets(env)
+	} else {
+		for _, r := range c.Routes {
+			if r.Provider != "" {
+				extraProviders = append(extraProviders, r.Provider)
+			}
+		}
 	}
-	if err := errors.Join(append(resolveErrs, c.validate()...)...); err != nil {
+	if err := errors.Join(append(resolveErrs, c.validate(extraProviders)...)...); err != nil {
 		return nil, err
 	}
 	return &c, nil
@@ -328,6 +348,23 @@ func (c *Config) resolveSecrets(env LookupEnv) []error {
 		app.SigningSecret = get(p+"signing_secret_env", app.SigningSecretEnv, true)
 		app.PreviousSigningSecret = get(p+"previous_signing_secret_env", app.PreviousSigningSecretEnv, false)
 		app.RegistrationToken = get(p+"registration_token_env", app.RegistrationTokenEnv, false)
+	}
+	return errs
+}
+
+// missingSecrets reports secrets a Config built in Go left empty.
+func (c *Config) missingSecrets() []error {
+	var errs []error
+	if p := c.Providers.Paystack; p != nil && p.Secret == "" {
+		errs = append(errs, errors.New("providers.paystack: Secret is required"))
+	}
+	if p := c.Providers.Flutterwave; p != nil && p.SecretHash == "" {
+		errs = append(errs, errors.New("providers.flutterwave: SecretHash is required"))
+	}
+	for _, id := range c.sortedAppIDs() {
+		if app := c.Applications[id]; app != nil && app.SigningSecret == "" {
+			errs = append(errs, fmt.Errorf("applications.%s: SigningSecret is required", id))
+		}
 	}
 	return errs
 }

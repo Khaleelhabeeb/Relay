@@ -14,7 +14,7 @@ import (
 
 	"github.com/khaleelhabeeb/relay/internal/apierr"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
-	"github.com/khaleelhabeeb/relay/internal/provider"
+	"github.com/khaleelhabeeb/relay/provider"
 )
 
 // Accepted is a verified, parsed inbound event.

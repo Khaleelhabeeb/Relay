@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/khaleelhabeeb/relay/internal/provider"
+	"github.com/khaleelhabeeb/relay/provider"
 )
 
 var ErrMalformedEvent = errors.New("flutterwave: malformed event")
@@ -82,7 +82,8 @@ func DedupKey(e *provider.Event, ids provider.Identifiers) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// Adapter is the provider.Adapter for Flutterwave.
+// Adapter is the provider.Adapter for Flutterwave. The zero value parses but
+// rejects every signature.
 type Adapter struct {
 	SecretHash string // the secret hash set in the Flutterwave dashboard
 }
@@ -100,3 +101,9 @@ func (Adapter) ExtractIdentifiers(e *provider.Event) provider.Identifiers {
 }
 
 func (Adapter) DedupKey(e *provider.Event, ids provider.Identifiers) string { return DedupKey(e, ids) }
+
+// routedEvents are routed; others are stored as unsupported until their
+// ownership fields are verified against real payloads.
+var routedEvents = map[string]bool{"charge.completed": true}
+
+func (Adapter) Routes(eventType string) bool { return routedEvents[eventType] }

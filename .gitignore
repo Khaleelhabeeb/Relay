@@ -9,6 +9,7 @@
 !.env.example
 coverage.out
 
-docs
+docs/*
+!docs/library.md
 system-design.md
 .claude

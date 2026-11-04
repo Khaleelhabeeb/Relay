@@ -34,13 +34,13 @@ docker:
 
 FUZZTIME ?= 30s
 fuzz:
-	$(GO) test -run '^$$' -fuzz '^FuzzVerify$$' -fuzztime $(FUZZTIME) ./internal/paystack
-	$(GO) test -run '^$$' -fuzz '^FuzzParseAndExtract$$' -fuzztime $(FUZZTIME) ./internal/paystack
-	$(GO) test -run '^$$' -fuzz '^FuzzVerify$$' -fuzztime $(FUZZTIME) ./internal/flutterwave
-	$(GO) test -run '^$$' -fuzz '^FuzzParseAndExtract$$' -fuzztime $(FUZZTIME) ./internal/flutterwave
+	$(GO) test -run '^$$' -fuzz '^FuzzVerify$$' -fuzztime $(FUZZTIME) ./provider/paystack
+	$(GO) test -run '^$$' -fuzz '^FuzzParseAndExtract$$' -fuzztime $(FUZZTIME) ./provider/paystack
+	$(GO) test -run '^$$' -fuzz '^FuzzVerify$$' -fuzztime $(FUZZTIME) ./provider/flutterwave
+	$(GO) test -run '^$$' -fuzz '^FuzzParseAndExtract$$' -fuzztime $(FUZZTIME) ./provider/flutterwave
 	$(GO) test -run '^$$' -fuzz '^FuzzEnvelope$$' -fuzztime $(FUZZTIME) ./internal/delivery
 	$(GO) test -run '^$$' -fuzz '^FuzzVerifySignature$$' -fuzztime $(FUZZTIME) ./internal/delivery
-	$(GO) test -run '^$$' -fuzz '^FuzzLoad$$' -fuzztime $(FUZZTIME) ./internal/config
+	$(GO) test -run '^$$' -fuzz '^FuzzLoad$$' -fuzztime $(FUZZTIME) ./config
 
 # Kills a real relay process with SIGKILL during ingest and delivery and
 # checks that no acknowledged event is lost and every event is delivered.

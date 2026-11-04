@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/khaleelhabeeb/relay/internal/config"
+	"github.com/khaleelhabeeb/relay/config"
 	"github.com/khaleelhabeeb/relay/internal/ids"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
 	"github.com/khaleelhabeeb/relay/internal/store"

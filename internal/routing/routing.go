@@ -13,9 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/khaleelhabeeb/relay/internal/config"
-	"github.com/khaleelhabeeb/relay/internal/paystack"
-	"github.com/khaleelhabeeb/relay/internal/provider"
+	"github.com/khaleelhabeeb/relay/config"
+	"github.com/khaleelhabeeb/relay/provider"
+	"github.com/khaleelhabeeb/relay/provider/flutterwave"
+	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
 
 type Outcome string
@@ -38,14 +39,6 @@ const (
 	SourceRule         = "rule"
 	SourceRegistration = "registration"
 )
-
-// supportedEvents are the event types routed per provider. Others are stored
-// as unsupported until their ownership fields are verified against real
-// payloads.
-var supportedEvents = map[string]map[string]bool{
-	provider.Paystack:    {"charge.success": true},
-	provider.Flutterwave: {"charge.completed": true},
-}
 
 // Rule is a static route from configuration.
 type Rule struct {
@@ -86,10 +79,36 @@ type RegistrationLookup interface {
 }
 
 type Engine struct {
-	rules []Rule
+	rules    []Rule
+	adapters map[string]provider.Adapter
+	names    []string
 }
 
-func NewEngine(rules []Rule) *Engine { return &Engine{rules: rules} }
+// NewEngine builds an engine over rules for the given providers. Without
+// adapters it knows the built-in providers, without secrets: enough to
+// route and re-read stored events, not to verify webhooks.
+func NewEngine(rules []Rule, adapters ...provider.Adapter) *Engine {
+	if len(adapters) == 0 {
+		adapters = []provider.Adapter{paystack.Adapter{}, flutterwave.Adapter{}}
+	}
+	e := &Engine{rules: rules, adapters: make(map[string]provider.Adapter, len(adapters))}
+	for _, a := range adapters {
+		if _, dup := e.adapters[a.Name()]; !dup {
+			e.names = append(e.names, a.Name())
+		}
+		e.adapters[a.Name()] = a
+	}
+	return e
+}
+
+// Adapter returns the adapter for a provider name.
+func (e *Engine) Adapter(name string) (provider.Adapter, bool) {
+	a, ok := e.adapters[name]
+	return a, ok
+}
+
+// Providers returns the engine's provider names in registration order.
+func (e *Engine) Providers() []string { return append([]string(nil), e.names...) }
 
 // RulesFromConfig converts configured routes to rules, preserving order.
 func RulesFromConfig(routes []config.RouteConfig) []Rule {
@@ -110,7 +129,8 @@ func RulesFromConfig(routes []config.RouteConfig) []Rule {
 // reduces them to a decision. lookup may be nil (no registrations) and must
 // cover only prov's registrations.
 func (e *Engine) Resolve(ctx context.Context, prov, eventType string, ids provider.Identifiers, receivedAt time.Time, lookup RegistrationLookup) (Decision, error) {
-	if !supportedEvents[prov][eventType] {
+	ad, ok := e.adapters[prov]
+	if !ok || !ad.Routes(eventType) {
 		return Decision{Outcome: Unsupported, Reason: fmt.Sprintf("event type %q is not routed in this version", eventType)}, nil
 	}
 
@@ -149,7 +169,7 @@ func (e *Engine) Resolve(ctx context.Context, prov, eventType string, ids provid
 		return Decision{Outcome: Matched, Application: apps[0], Candidates: cands,
 			Reason: fmt.Sprintf("%d matching rule(s)/registration(s), one application", len(cands))}, nil
 	case 0:
-		return Decision{Outcome: Unresolved, Candidates: cands, Reason: unresolvedReason(prov, ids)}, nil
+		return Decision{Outcome: Unresolved, Candidates: cands, Reason: unresolvedReason(ad, ids)}, nil
 	default:
 		return Decision{Outcome: Ambiguous, Candidates: cands,
 			Reason: "conflicting owners: " + strings.Join(apps, ", ")}, nil
@@ -211,9 +231,11 @@ func distinctApps(cands []Candidate) []string {
 	return apps
 }
 
-func unresolvedReason(prov string, ids provider.Identifiers) string {
-	if prov == provider.Paystack && ids.Channel == paystack.ChannelDedicatedNUBAN && ids.DedicatedAccount == nil {
-		return "dedicated_nuban event without receiver account fields"
+func unresolvedReason(ad provider.Adapter, ids provider.Identifiers) string {
+	if h, ok := ad.(provider.Hinter); ok {
+		if hint := h.UnresolvedHint(ids); hint != "" {
+			return hint
+		}
 	}
 	if ids.Reference == "" && len(ids.Metadata) == 0 && ids.DedicatedAccount == nil {
 		return "event carries no ownership identifiers"
