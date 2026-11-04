@@ -26,6 +26,7 @@ import (
 var (
 	tokenA = strings.Repeat("s", 40)
 	tokenB = strings.Repeat("e", 40)
+	tokenC = strings.Repeat("c", 40) // app_c owns the APPC_ namespace
 )
 
 // clock is a settable time source shared by the handler, reprocessor and ingest.
@@ -56,10 +57,12 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(func() { st.Close() })
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	clk := &clock{t: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
-	engine := routing.NewEngine([]routing.Rule{{Name: "routes[0]", Application: "app_a", ReferencePrefix: "APPA_"}})
+	engine := routing.NewEngine([]routing.Rule{{Name: "routes[0]", Application: "app_a", ReferencePrefix: "APPA_"}}).
+		WithNamespaces(map[string][]string{"app_c": {"APPC_"}})
 	cfg := &config.Config{Applications: map[string]*config.ApplicationConfig{
 		"app_a":    {RegistrationToken: tokenA},
 		"app_b":    {RegistrationToken: tokenB},
+		"app_c":    {RegistrationToken: tokenC},
 		"no_token": {},
 	}}
 	cfg.Providers.Paystack = &config.PaystackConfig{}
@@ -391,19 +394,53 @@ func TestDedicatedAccountTimeWindow(t *testing.T) {
 	}
 }
 
-func TestRegistrationConflictingWithRuleIsAmbiguous(t *testing.T) {
+func TestRegistrationCannotClaimAnotherApplicationsPrefix(t *testing.T) {
 	e := newEnv(t)
-	// The APPA_ prefix routes to app_a; app_b registering such a
-	// reference must not override it.
-	if r := e.do("POST", "/v1/registrations", tokenB, refBody("APPA_SHARED")); r.status != 201 {
-		t.Fatalf("register: %d", r.status)
+	// APPA_ is routed to app_a by a rule; APPC_ is app_c's namespace.
+	for _, ref := range []string{"APPA_SHARED", "APPC_1"} {
+		if r := e.do("POST", "/v1/registrations", tokenB, refBody(ref)); r.status != 409 || r.code() != "registration_conflict" {
+			t.Errorf("app_b registering %s: %d %v, want 409", ref, r.status, r.body)
+		}
 	}
-	id := e.ingestAt([]byte(`{"event":"charge.success","data":{"id":9,"reference":"APPA_SHARED"}}`))
-	if s, _ := e.status(id); s != routing.Ambiguous {
-		t.Fatalf("got %s, want ambiguous", s)
+	// A namespaced application may register only inside its namespace.
+	if r := e.do("POST", "/v1/registrations", tokenC, refBody("OTHER_1")); r.status != 422 {
+		t.Errorf("app_c outside its namespace: %d %v, want 422", r.status, r.body)
 	}
-	if dels, _ := e.store.DeliveriesForEvent(context.Background(), id); len(dels) != 0 {
-		t.Fatal("ambiguous events are never delivered")
+	if r := e.do("POST", "/v1/registrations", tokenC, refBody("APPC_1")); r.status != 201 {
+		t.Errorf("app_c inside its namespace: %d %v, want 201", r.status, r.body)
+	}
+	// Dedicated accounts have no namespace.
+	if r := e.do("POST", "/v1/registrations", tokenC, dvaBody("Test Bank", "9930000902")); r.status != 201 {
+		t.Errorf("app_c dedicated account: %d %v, want 201", r.status, r.body)
+	}
+}
+
+// A registration made long after a webhook claims it only inside the
+// registering application's own namespace.
+func TestRetroactiveClaimNeedsNamespace(t *testing.T) {
+	e := newEnv(t)
+	foreign := e.ingestAt([]byte(`{"event":"charge.success","data":{"id":1,"reference":"SOMEONES_1"}}`))
+	own := e.ingestAt([]byte(`{"event":"charge.success","data":{"id":2,"reference":"APPC_9"}}`))
+	dva := e.ingestAt(dvaDeposit(3))
+
+	e.clock.Add(time.Hour)
+	if r := e.do("POST", "/v1/registrations", tokenB, refBody("SOMEONES_1")); r.status != 201 || r.body["routed_events"] != float64(0) {
+		t.Fatalf("late foreign claim: %d %v", r.status, r.body)
+	}
+	if s, _ := e.status(foreign); s != routing.Unresolved {
+		t.Errorf("foreign event: %s, want unresolved", s)
+	}
+	if r := e.do("POST", "/v1/registrations", tokenB, dvaBody("Test Bank", "9930000902")); r.body["routed_events"] != float64(0) {
+		t.Fatalf("late dva claim: %v", r.body)
+	}
+	if s, _ := e.status(dva); s != routing.Unresolved {
+		t.Errorf("dva event: %s, want unresolved", s)
+	}
+	if r := e.do("POST", "/v1/registrations", tokenC, refBody("APPC_9")); r.body["routed_events"] != float64(1) {
+		t.Fatalf("namespaced claim: %v", r.body)
+	}
+	if s, app := e.status(own); s != routing.Matched || app != "app_c" {
+		t.Errorf("namespaced event: %s %s, want app_c", s, app)
 	}
 }
 

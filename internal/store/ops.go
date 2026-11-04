@@ -187,6 +187,10 @@ func (s *Store) Purge(ctx context.Context, payloadCutoff, attemptCutoff time.Tim
 			return err
 		}
 		r.PayloadsCleared, _ = res.RowsAffected()
+		if _, err := tx.ExecContext(ctx, `UPDATE dedup_conflicts SET raw_payload = NULL
+			WHERE raw_payload IS NOT NULL AND received_at < ?`, ms(payloadCutoff)); err != nil {
+			return err
+		}
 		res, err = tx.ExecContext(ctx, `DELETE FROM delivery_attempts WHERE finished_at IS NOT NULL AND finished_at < ?`,
 			ms(attemptCutoff))
 		if err != nil {

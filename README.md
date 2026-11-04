@@ -498,7 +498,10 @@ the timestamp is fixed in the past.
 - **Respond quickly.** Do slow work after you respond.
 - **Verify the payment with Paystack or Flutterwave** before granting value: check amount, currency, status and
   reference. A valid Relay signature proves the request came from Relay, not that the payment
-  meets your business rules.
+  happened. Every application sharing a Paystack account holds its secret key, and anyone with
+  that key can send Relay a correctly signed webhook. Relay then delivers it like any other.
+  Setting `confirm_with_api` on the provider makes Relay check each payment with the provider's API
+  before accepting it, but your own check is still the one that protects you.
 
 ## Registering ownership
 
@@ -531,9 +534,9 @@ curl -X DELETE -H "Authorization: Bearer $APP_B_RELAY_TOKEN" http://127.0.0.1:80
 
 | Response | Meaning |
 |---|---|
-| `201` | Created. `routed_events` counts earlier unresolved webhooks (last 72 hours) that this registration just routed to you. |
+| `201` | Created. `routed_events` counts earlier unresolved webhooks that this registration just routed to you (see below for which). |
 | `200` | You already own it. Registering is idempotent. |
-| `409 registration_conflict` | Another application owns it. |
+| `409 registration_conflict` | Another application owns it, or it falls under another application's `reference_prefixes` or a static route to another application. |
 | `401` / `422` / `429` | Bad token; invalid request (including a provider that isn't enabled, or `dedicated_account` for Flutterwave); or rate limited (10 requests per second per application, bursts of 20) |
 
 Registrations are kept separately per provider. A Paystack registration of a reference never
@@ -544,8 +547,18 @@ claims a Flutterwave event with the same reference, and the reverse holds too.
   The original owner can claim them again.
 - **Virtual accounts** can move to another application only after the current owner deactivates
   them. Each deposit goes to whoever owned the account when it arrived.
-- **A registration never overrides a static route** that points elsewhere. The event becomes
-  `ambiguous` and you resolve it.
+- **A registration never overrides a static route** or another application's namespace. A
+  reference that starts with another application's `reference_prefixes`, or with a
+  `reference_prefix` routed to another application, is refused with `409`.
+- **Reference namespaces.** Give each application `reference_prefixes` so nobody else can register
+  its references. An application that has them can only register references inside them, and
+  gets `422` for anything else.
+- **Webhooks that arrived first.** A registration also routes matching unresolved webhooks that
+  arrived before it. Inside the application's own `reference_prefixes` it picks up any from the
+  last 72 hours. Anywhere else, including virtual accounts, it only picks up ones that arrived
+  at most 15 minutes before the registration. Anything older stays `unresolved` for an
+  operator to `reroute`. Without this limit, an application could claim another application's
+  unrouted payments just by registering their references.
 
 ## Configuration reference
 
@@ -576,9 +589,12 @@ providers:                      # at least one provider
   paystack:
     secret_env: PAYSTACK_SECRET_KEY   # required: Paystack secret key (verifies x-paystack-signature)
     allowed_ips: []                   # optional source allowlist (IPs/CIDRs); empty = allow all
+    confirm_with_api: false           # check each routed event with Paystack's verify API before accepting it
   flutterwave:
     secret_hash_env: FLUTTERWAVE_SECRET_HASH  # required: dashboard secret hash (verif-hash / flutterwave-signature)
     allowed_ips: []                   # optional; Flutterwave's IPs change, so usually leave empty
+    confirm_with_api: false           # check each routed event with Flutterwave's verify API before accepting it
+    secret_key_env: FLUTTERWAVE_SECRET_KEY    # required with confirm_with_api: Flutterwave secret key (FLWSECK-...)
 
 applications:
   app_b:                         # application ID: lowercase letters, digits, _ or -
@@ -586,6 +602,7 @@ applications:
     signing_secret_env: APP_B_RELAY_SECRET            # required, ≥32 bytes, unique per app
     previous_signing_secret_env: APP_B_RELAY_SECRET_OLD  # optional, for rotation
     registration_token_env: APP_B_RELAY_TOKEN         # optional, ≥32 bytes, unique; enables the API
+    reference_prefixes: ["APPB_"]  # optional: references only this app may register (see Registering ownership)
     payload_format: original    # original (default) | envelope
 
 routes:                         # static ownership rules
@@ -621,6 +638,8 @@ retention:
   Overlaps that depend on the individual payment are caught at runtime, and the event becomes
   `ambiguous`. Routes scoped to different `provider`s never overlap. A route's `provider` must be
   configured.
+- **Reference namespaces:** `reference_prefixes` of different applications must not overlap each
+  other, or a `reference_prefix` route to a different application.
 
 <details>
 <summary><strong>Rotating an application's signing secret</strong></summary>
@@ -917,6 +936,11 @@ planned.
   its bytes differ.
 - **Flutterwave:** by `event:data.id:data.status`, as Flutterwave recommends.
 - **Anything else:** by a SHA-256 hash of the exact body.
+
+A genuine resend always carries the same reference and virtual account. If a "duplicate" carries
+different ones, it suggests forgery: someone with the provider secret may have sent a fake event
+first to take the transaction ID. Relay keeps that body, logs an error and counts
+`relay_webhooks_received_total{result="dedup_conflict"}`. `relay events inspect` lists it.
 
 ## Development
 

@@ -30,16 +30,35 @@ func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
 	var (
 		eventID   string
 		duplicate bool
+		conflict  *store.DedupConflict
+		stored    store.StoredIdentity
 		decision  routing.Decision
 	)
+	sum := sha256.Sum256(a.Event.Raw)
+	var dva string
+	if a.Identifiers.DedicatedAccount != nil {
+		dva = a.Identifiers.DedicatedAccount.Key()
+	}
 	err := s.Store.WithTx(ctx, func(tx *store.Tx) error {
-		existing, found, err := tx.EventIDByDedupKey(ctx, prov, a.DedupKey)
+		existing, found, err := tx.IdentityByDedupKey(ctx, prov, a.DedupKey)
 		if err != nil {
 			return err
 		}
 		if found {
-			eventID, duplicate = existing, true
-			return tx.RecordDuplicate(ctx, existing, a.ReceivedAt)
+			eventID, duplicate, stored = existing.ID, true, existing
+			// A genuine resend carries the same identifiers. One that does
+			// not was forged by a holder of the provider secret, or forged
+			// earlier to pre-empt this genuine event: keep it as evidence.
+			if existing.Reference != a.Identifiers.Reference || existing.DedicatedAccount != dva {
+				conflict = &store.DedupConflict{
+					ID: ids.New(ids.DedupConflict), EventID: existing.ID, Reference: a.Identifiers.Reference,
+					DedicatedAccount: dva, RawPayload: a.Event.Raw, PayloadSHA256: hex.EncodeToString(sum[:]), ReceivedAt: a.ReceivedAt,
+				}
+				if err := tx.RecordDedupConflict(ctx, conflict); err != nil {
+					return err
+				}
+			}
+			return tx.RecordDuplicate(ctx, existing.ID, a.ReceivedAt)
 		}
 
 		decision, err = s.Engine.Resolve(ctx, prov, a.Event.Type, a.Identifiers, a.ReceivedAt, tx.RegistrationLookup(prov))
@@ -48,21 +67,18 @@ func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
 		}
 
 		eventID = ids.New(ids.Event)
-		sum := sha256.Sum256(a.Event.Raw)
 		e := &store.Event{
-			ID:            eventID,
-			Provider:      prov,
-			EventType:     a.Event.Type,
-			DedupKey:      a.DedupKey,
-			RawPayload:    a.Event.Raw,
-			PayloadSHA256: hex.EncodeToString(sum[:]),
-			Reference:     a.Identifiers.Reference,
-			ReceivedAt:    a.ReceivedAt,
-			RoutingStatus: decision.Outcome,
-			ApplicationID: decision.Application,
-		}
-		if a.Identifiers.DedicatedAccount != nil {
-			e.DedicatedAccount = a.Identifiers.DedicatedAccount.Key()
+			ID:               eventID,
+			Provider:         prov,
+			EventType:        a.Event.Type,
+			DedupKey:         a.DedupKey,
+			RawPayload:       a.Event.Raw,
+			PayloadSHA256:    hex.EncodeToString(sum[:]),
+			Reference:        a.Identifiers.Reference,
+			ReceivedAt:       a.ReceivedAt,
+			RoutingStatus:    decision.Outcome,
+			ApplicationID:    decision.Application,
+			DedicatedAccount: dva,
 		}
 		if err := tx.InsertEvent(ctx, e); err != nil {
 			return err
@@ -74,13 +90,20 @@ func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
 	}
 
 	log := s.Logger.With("component", "ingest", "provider", prov, "event_id", eventID, "event_type", a.Event.Type)
-	if duplicate {
+	if conflict != nil {
+		s.Metrics.Webhook(prov, "dedup_conflict")
+	} else if duplicate {
 		s.Metrics.Webhook(prov, "duplicate")
 	} else {
 		s.Metrics.Webhook(prov, "accepted")
 		s.Metrics.Routed(string(decision.Outcome))
 	}
 	switch {
+	case conflict != nil:
+		log.Error("duplicate webhook carries different identifiers from the stored event: possible forgery; kept for review",
+			"dedup_conflict_id", conflict.ID, "dedup_key", a.DedupKey,
+			"stored_reference", stored.Reference, "reference", conflict.Reference,
+			"stored_dedicated_account", stored.DedicatedAccount, "dedicated_account", conflict.DedicatedAccount)
 	case duplicate:
 		log.Info("duplicate webhook; existing event kept")
 	case decision.Outcome == routing.Matched:

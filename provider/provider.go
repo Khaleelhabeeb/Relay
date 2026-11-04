@@ -6,7 +6,9 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 )
@@ -62,6 +64,24 @@ type Adapter interface {
 	// have checked against real payloads; others are stored as unsupported.
 	Routes(eventType string) bool
 }
+
+// Confirmer is optionally implemented by an Adapter to check a verified
+// event against the provider's own API before Relay accepts it. A webhook
+// signature proves only that the sender knows the account's secret, which
+// every application sharing the account may hold; the provider's record of
+// the transaction cannot be forged that way. Relay calls Confirm only for
+// event types the adapter Routes.
+type Confirmer interface {
+	// Confirm returns nil when the provider's record matches e (or
+	// confirmation is turned off), an error wrapping ErrNotConfirmed when
+	// it does not, and any other error when the provider could not be
+	// asked; Relay then answers 503 so the provider retries the webhook.
+	Confirm(ctx context.Context, e *Event, ids Identifiers) error
+}
+
+// ErrNotConfirmed means the provider's API has no matching record of an
+// event: it was forged, or describes a transaction differently.
+var ErrNotConfirmed = errors.New("provider: event does not match the provider's record")
 
 // Hinter is optionally implemented by an Adapter to explain, for operators,
 // why an event that could not be routed carried no usable identifiers. An

@@ -22,11 +22,13 @@ applications:
     endpoint: "https://app-a.example.com/webhooks/relay"
     signing_secret_env: APP_A_RELAY_SIGNING_SECRET
     registration_token_env: APP_A_RELAY_API_TOKEN
+    reference_prefixes: ["APPA_"]   # only app_a may register these references
     payload_format: original
   app_b:
     endpoint: "https://app-b.example.com/webhooks/relay"
     signing_secret_env: APP_B_RELAY_SIGNING_SECRET
     registration_token_env: APP_B_RELAY_API_TOKEN
+    reference_prefixes: ["APPB_"]
     payload_format: envelope
 
 routes:

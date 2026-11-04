@@ -89,6 +89,10 @@ func newEventsInspectCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			conflicts, err := env.store.DedupConflictsForEvent(ctx, e.ID)
+			if err != nil {
+				return err
+			}
 			attempts := map[string][]store.Attempt{}
 			for _, d := range deliveries {
 				if attempts[d.ID], err = env.store.AttemptsForDelivery(ctx, d.ID); err != nil {
@@ -103,6 +107,7 @@ func newEventsInspectCmd() *cobra.Command {
 					"received_at": e.ReceivedAt, "last_seen_at": e.LastSeenAt, "duplicate_count": e.DuplicateCount,
 					"payload_bytes": len(e.RawPayload), "payload_sha256": e.PayloadSHA256,
 					"routing_decisions": decisions, "deliveries": deliveries, "attempts": attempts,
+					"dedup_conflicts": conflicts,
 				}
 				if showPayload && e.RawPayload != nil {
 					out["payload"] = json.RawMessage(e.RawPayload)
@@ -158,8 +163,21 @@ func newEventsInspectCmd() *cobra.Command {
 					})
 				}
 			}
+			if len(conflicts) > 0 {
+				fmt.Fprintln(w, "\nConflicting duplicates (same dedup key, different identifiers: possible forgery)")
+				env.table("  RECEIVED\tREFERENCE\tDVA\tSHA256", func(tw io.Writer) {
+					for _, c := range conflicts {
+						fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", ts(c.ReceivedAt), dash(c.Reference), dash(c.DedicatedAccount), c.PayloadSHA256)
+					}
+				})
+			}
 			if showPayload && e.RawPayload != nil {
 				fmt.Fprintf(w, "\nPayload\n%s\n", e.RawPayload)
+				for _, c := range conflicts {
+					if c.RawPayload != nil {
+						fmt.Fprintf(w, "\nConflicting payload %s\n%s\n", c.ID, c.RawPayload)
+					}
+				}
 			}
 			return nil
 		}),
@@ -178,7 +196,7 @@ func newEventsReprocessCmd() *cobra.Command {
 			"With event IDs, only those events are reprocessed; otherwise every unresolved event " +
 			"(optionally limited by --since). Events that are already routed are never changed.",
 		RunE: withTool(func(ctx context.Context, env *toolEnv, args []string) error {
-			rp := &reprocess.Reprocessor{Store: env.store, Engine: routing.NewEngine(routing.RulesFromConfig(env.cfg.Routes)), Logger: quietLogger()}
+			rp := &reprocess.Reprocessor{Store: env.store, Engine: routing.NewEngine(routing.RulesFromConfig(env.cfg.Routes)).WithNamespaces(routing.NamespacesFromConfig(env.cfg.Applications)), Logger: quietLogger()}
 			var (
 				res reprocess.Result
 				err error

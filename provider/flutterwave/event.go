@@ -86,6 +86,13 @@ func DedupKey(e *provider.Event, ids provider.Identifiers) string {
 // rejects every signature.
 type Adapter struct {
 	SecretHash string // the secret hash set in the Flutterwave dashboard
+	// ConfirmWithAPI makes Confirm check each routed event with
+	// Flutterwave's verify API before Relay accepts it (see
+	// provider.Confirmer). It needs SecretKey.
+	ConfirmWithAPI bool
+	SecretKey      string       // Flutterwave secret key (FLWSECK-...), used only by Confirm
+	APIBaseURL     string       // default DefaultAPIBaseURL
+	HTTPClient     *http.Client // default: a client with a 10s timeout
 }
 
 func (Adapter) Name() string { return provider.Flutterwave }

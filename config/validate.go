@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/khaleelhabeeb/relay/internal/netguard"
 )
@@ -114,6 +115,36 @@ func (c *Config) validate(extraProviders []string) []error {
 				fail("%s.registration_token_env: same token as applications.%s; tokens must identify one application", p, other)
 			}
 			tokens[t] = id
+		}
+	}
+
+	// Reference namespaces must not overlap each other, nor a route that
+	// sends references to a different application.
+	type owned struct{ prefix, app, where string }
+	var namespaces []owned
+	for _, id := range c.sortedAppIDs() {
+		app := c.Applications[id]
+		if app == nil {
+			continue
+		}
+		for _, pfx := range app.ReferencePrefixes {
+			if strings.TrimSpace(pfx) == "" || strings.ContainsFunc(pfx, unicode.IsSpace) {
+				fail("applications.%s.reference_prefixes: %q must be non-empty without whitespace", id, pfx)
+				continue
+			}
+			namespaces = append(namespaces, owned{pfx, id, "applications." + id + ".reference_prefixes"})
+		}
+	}
+	for i, a := range namespaces {
+		for _, b := range namespaces[i+1:] {
+			if a.app != b.app && prefixesOverlap(a.prefix, b.prefix) {
+				fail("%s %q and %s %q overlap", a.where, a.prefix, b.where, b.prefix)
+			}
+		}
+		for j, r := range c.Routes {
+			if r.Application != a.app && r.Match.ReferencePrefix != "" && prefixesOverlap(a.prefix, r.Match.ReferencePrefix) {
+				fail("routes[%d] sends reference prefix %q to %s, overlapping %s %q", j, r.Match.ReferencePrefix, r.Application, a.where, a.prefix)
+			}
 		}
 	}
 
@@ -224,6 +255,11 @@ func CheckEndpoint(raw string, allowInsecure bool) error {
 		return fmt.Errorf("non-public address %s not allowed (set delivery.allow_insecure_local for development)", host)
 	}
 	return nil
+}
+
+// prefixesOverlap reports whether some reference can start with both.
+func prefixesOverlap(a, b string) bool {
+	return strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
 }
 
 func validIPOrPrefix(s string) bool {

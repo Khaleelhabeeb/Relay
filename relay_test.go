@@ -220,7 +220,8 @@ func TestNewRejectsBadConfig(t *testing.T) {
 	if _, err := relay.New(ctx, cfg, relay.WithProvider(badName{})); err == nil || !strings.Contains(err.Error(), "invalid provider name") {
 		t.Errorf("bad provider name: %v", err)
 	}
-	for _, a := range []provider.Adapter{paystack.Adapter{}, &paystack.Adapter{}, flutterwave.Adapter{}, &flutterwave.Adapter{}} {
+	for _, a := range []provider.Adapter{paystack.Adapter{}, &paystack.Adapter{}, flutterwave.Adapter{}, &flutterwave.Adapter{},
+		flutterwave.Adapter{SecretHash: "h", ConfirmWithAPI: true}} {
 		cfg = testConfig(t, "http://127.0.0.1:1", "http://127.0.0.1:2")
 		if _, err := relay.New(ctx, cfg, relay.WithProvider(a)); err == nil || !strings.Contains(err.Error(), "empty secret") {
 			t.Errorf("%T without secret: %v", a, err)

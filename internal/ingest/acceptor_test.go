@@ -161,6 +161,32 @@ func TestAcceptDuplicates(t *testing.T) {
 	}
 }
 
+// A forger holding the provider secret can send charge.success for a
+// transaction id before the genuine webhook. The genuine one then shares the
+// dedup key but not the reference: it must be kept, not silently counted.
+func TestAcceptKeepsConflictingDuplicate(t *testing.T) {
+	acc, st, _ := newAcceptor(t)
+	ctx := context.Background()
+	forged := []byte(`{"event":"charge.success","data":{"id":77,"reference":"APPA_FORGED"}}`)
+	genuine := []byte(`{"event":"charge.success","data":{"id":77,"reference":"ED_REAL"}}`)
+	for _, body := range [][]byte{forged, forged, genuine} {
+		if err := acc.Accept(ctx, accepted(t, body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := eventByKey(t, st, "charge.success:77")
+	if e.DuplicateCount != 2 || e.Reference != "APPA_FORGED" {
+		t.Fatalf("stored event %+v", e)
+	}
+	cs, err := st.DedupConflictsForEvent(ctx, e.ID)
+	if err != nil || len(cs) != 1 {
+		t.Fatalf("conflicts = %v, %v; want only the genuine body (an identical resend is not a conflict)", cs, err)
+	}
+	if cs[0].Reference != "ED_REAL" || !bytes.Equal(cs[0].RawPayload, genuine) {
+		t.Fatalf("conflict %+v", cs[0])
+	}
+}
+
 func TestAcceptConcurrentDuplicates(t *testing.T) {
 	acc, st, _ := newAcceptor(t)
 	raw := fixture(t, "charge_success_checkout.json")

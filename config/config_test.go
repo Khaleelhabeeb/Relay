@@ -121,6 +121,11 @@ func TestValidationErrors(t *testing.T) {
 		{"missing flutterwave hash", bothProviders, map[string]string{"FLW_SECRET_HASH": ""}, "FLW_SECRET_HASH is not set"},
 		{"bad flutterwave allowlist", strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "providers: {flutterwave: {secret_hash_env: FLW_SECRET_HASH, allowed_ips: [nope]}}", 1), nil, "providers.flutterwave.allowed_ips"},
 		{"route provider not configured", base + "routes: [{provider: flutterwave, application: app_a, match: {reference_prefix: X_}}]\n", nil, `"flutterwave" is not a configured provider`},
+		{"namespaces overlap", strings.Replace(strings.Replace(base, "    registration_token_env: APP_A_RELAY_API_TOKEN\n", "    registration_token_env: APP_A_RELAY_API_TOKEN\n    reference_prefixes: [APPA_]\n", 1), "    payload_format: envelope\n", "    payload_format: envelope\n    reference_prefixes: [APPA_X]\n", 1), nil, "overlap"},
+		{"route overlaps namespace", strings.Replace(base, "    registration_token_env: APP_A_RELAY_API_TOKEN\n", "    registration_token_env: APP_A_RELAY_API_TOKEN\n    reference_prefixes: [APPA_]\n", 1) + "routes: [{application: app_b, match: {reference_prefix: APP}}]\n", nil, "overlapping"},
+		{"blank namespace prefix", strings.Replace(base, "    payload_format: envelope\n", "    payload_format: envelope\n    reference_prefixes: [' ']\n", 1), nil, "reference_prefixes"},
+		{"flutterwave confirm without secret key", strings.Replace(bothProviders, "flutterwave: {secret_hash_env: FLW_SECRET_HASH}", "flutterwave: {secret_hash_env: FLW_SECRET_HASH, confirm_with_api: true}", 1), nil, "secret_key_env: required"},
+		{"flutterwave confirm with unset secret key", strings.Replace(bothProviders, "flutterwave: {secret_hash_env: FLW_SECRET_HASH}", "flutterwave: {secret_hash_env: FLW_SECRET_HASH, confirm_with_api: true, secret_key_env: FLW_SECRET_KEY}", 1), nil, "FLW_SECRET_KEY is not set"},
 		{"unscoped route overlaps scoped", bothProviders + "routes:\n- {provider: flutterwave, application: app_a, match: {reference_prefix: A}}\n- {application: app_b, match: {reference_prefix: A}}\n", nil, "overlap"},
 	}
 	for _, tc := range cases {
@@ -139,6 +144,8 @@ func TestValidationAccepts(t *testing.T) {
 		"disjoint prefixes":                           base + "routes:\n- {application: app_a, match: {reference_prefix: APPA_}}\n- {application: app_b, match: {reference_prefix: ED_}}\n",
 		"same app overlapping":                        base + "routes:\n- {application: app_a, match: {reference_prefix: S}}\n- {application: app_a, match: {reference_prefix: APPA_}}\n",
 		"same prefix, different providers":            bothProviders + "routes:\n- {provider: paystack, application: app_a, match: {reference_prefix: A}}\n- {provider: flutterwave, application: app_b, match: {reference_prefix: A}}\n",
+		"namespace with own route":                    strings.Replace(base, "    registration_token_env: APP_A_RELAY_API_TOKEN\n", "    registration_token_env: APP_A_RELAY_API_TOKEN\n    reference_prefixes: [APPA_]\n", 1) + "routes: [{application: app_a, match: {reference_prefix: APPA_}}]\n",
+		"confirm with api":                            strings.Replace(bothProviders, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}, flutterwave: {secret_hash_env: FLW_SECRET_HASH}}", "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY, confirm_with_api: true}, flutterwave: {secret_hash_env: FLW_SECRET_HASH, confirm_with_api: true, secret_key_env: PAYSTACK_SECRET_KEY}}", 1),
 		"flutterwave only":                            strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "providers: {flutterwave: {secret_hash_env: FLW_SECRET_HASH}}", 1),
 		"insecure local opt-in":                       strings.Replace(base, "https://uni.example.com", "http://127.0.0.1:9000", 1) + "delivery: {allow_insecure_local: true}\n",
 	}

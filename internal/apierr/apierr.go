@@ -19,6 +19,8 @@ const (
 	StorageUnavailable   = "storage_unavailable"
 	Forbidden            = "forbidden"
 	ServerBusy           = "server_busy"
+	NotConfirmed         = "not_confirmed"
+	ConfirmUnavailable   = "confirmation_unavailable"
 )
 
 type body struct {

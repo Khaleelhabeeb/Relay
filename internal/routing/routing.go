@@ -78,10 +78,18 @@ type RegistrationLookup interface {
 	Registrations(ctx context.Context, identifierType, value string) ([]Registration, error)
 }
 
+// RetroactiveGrace bounds how long before its registration an event may
+// have arrived and still be claimed by it, when the reference is not in the
+// registering application's own namespace (or the identifier is a dedicated
+// account). It covers a webhook that beats its registration by moments,
+// without letting an application claim another's older unrouted payments.
+const RetroactiveGrace = 15 * time.Minute
+
 type Engine struct {
-	rules    []Rule
-	adapters map[string]provider.Adapter
-	names    []string
+	rules      []Rule
+	adapters   map[string]provider.Adapter
+	names      []string
+	namespaces map[string][]string // application → reference prefixes it owns
 }
 
 // NewEngine builds an engine over rules for the given providers. Without
@@ -99,6 +107,57 @@ func NewEngine(rules []Rule, adapters ...provider.Adapter) *Engine {
 		e.adapters[a.Name()] = a
 	}
 	return e
+}
+
+// WithNamespaces sets each application's reference namespace (see
+// config.ApplicationConfig.ReferencePrefixes) and returns e.
+func (e *Engine) WithNamespaces(ns map[string][]string) *Engine {
+	e.namespaces = ns
+	return e
+}
+
+// NamespacesFromConfig collects the applications' reference_prefixes.
+func NamespacesFromConfig(apps map[string]*config.ApplicationConfig) map[string][]string {
+	ns := map[string][]string{}
+	for id, a := range apps {
+		if a != nil && len(a.ReferencePrefixes) > 0 {
+			ns[id] = a.ReferencePrefixes
+		}
+	}
+	return ns
+}
+
+// InNamespace reports whether reference starts with one of app's prefixes.
+func (e *Engine) InNamespace(app, reference string) bool {
+	for _, p := range e.namespaces[app] {
+		if strings.HasPrefix(reference, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasNamespace reports whether app has declared reference prefixes.
+func (e *Engine) HasNamespace(app string) bool { return len(e.namespaces[app]) > 0 }
+
+// ReferenceOwner returns the application other than app that a reference
+// of prov belongs to by namespace or by a static reference_prefix route,
+// and a description of why; "" if none.
+func (e *Engine) ReferenceOwner(prov, reference, app string) (owner, why string) {
+	for other, prefixes := range e.namespaces {
+		for _, p := range prefixes {
+			if other != app && strings.HasPrefix(reference, p) {
+				return other, fmt.Sprintf("reference prefix %q belongs to %s", p, other)
+			}
+		}
+	}
+	for _, r := range e.rules {
+		if r.Application != app && (r.Provider == "" || r.Provider == prov) &&
+			r.ReferencePrefix != "" && strings.HasPrefix(reference, r.ReferencePrefix) {
+			return r.Application, fmt.Sprintf("%s routes reference prefix %q to %s", r.Name, r.ReferencePrefix, r.Application)
+		}
+	}
+	return "", ""
 }
 
 // Adapter returns the adapter for a provider name.
@@ -156,7 +215,11 @@ func (e *Engine) Resolve(ctx context.Context, prov, eventType string, ids provid
 			if err != nil {
 				return Decision{}, fmt.Errorf("routing: lookup %s: %w", c.typ, err)
 			}
-			for _, reg := range OwnersAt(regs, receivedAt) {
+			mayPredate := func(r Registration) bool {
+				return (c.typ == IdentifierReference && e.InNamespace(r.Application, c.value)) ||
+					!r.CreatedAt.After(receivedAt.Add(RetroactiveGrace))
+			}
+			for _, reg := range OwnersAt(regs, receivedAt, mayPredate) {
 				cands = append(cands, Candidate{Application: reg.Application, Source: SourceRegistration,
 					Detail: fmt.Sprintf("%s %s", c.typ, reg.ID)})
 			}
@@ -202,17 +265,20 @@ func (r Rule) match(ids provider.Identifiers) (string, bool) {
 // received at t:
 //   - claims whose tenure covers t (created at or before t, not deactivated
 //     by t); otherwise
-//   - the identifier's only-ever registration, if still active. This covers
-//     a webhook that beats its registration, without ever handing an old
-//     event to a later owner of a reassigned identifier.
-func OwnersAt(regs []Registration, t time.Time) []Registration {
+//   - the identifier's only-ever registration, if still active and
+//     mayPredate allows it to claim an event from before it was created.
+//     This covers a webhook that beats its registration, without ever
+//     handing an old event to a later owner of a reassigned identifier.
+//
+// mayPredate nil allows any such claim.
+func OwnersAt(regs []Registration, t time.Time, mayPredate func(Registration) bool) []Registration {
 	var owners []Registration
 	for _, r := range regs {
 		if !r.CreatedAt.After(t) && (r.Active || r.DeactivatedAt.After(t)) {
 			owners = append(owners, r)
 		}
 	}
-	if len(owners) == 0 && len(regs) == 1 && regs[0].Active {
+	if len(owners) == 0 && len(regs) == 1 && regs[0].Active && (mayPredate == nil || mayPredate(regs[0])) {
 		owners = regs
 	}
 	return owners

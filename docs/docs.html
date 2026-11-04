@@ -432,7 +432,10 @@ export async function POST(req: Request) {
       <li><strong>Respond quickly.</strong> Do slow work after you respond.</li>
       <li><strong>Verify the payment with Paystack or Flutterwave</strong> before granting value: check amount,
         currency, status and reference. A valid Relay signature proves the request came from Relay, not that the
-        payment meets your business rules.</li>
+        payment happened. Every application sharing a Paystack account holds its secret key, and anyone with that key
+        can send Relay a correctly signed webhook. Relay then delivers it like any other. Setting
+        <code>confirm_with_api</code> on the provider makes Relay check each payment with the provider's API before
+        accepting it, but your own check is still the one that protects you.</li>
     </ul>
 
     <!-- ───────────────────────────── Registering -->
@@ -461,9 +464,9 @@ curl -H "Authorization: Bearer $APP_B_RELAY_TOKEN" "http://127.0.0.1:8081/v1/reg
 curl -X DELETE -H "Authorization: Bearer $APP_B_RELAY_TOKEN" http://127.0.0.1:8081/v1/registrations/reg_01J...</code></pre>
     <table>
       <tr><th>Response</th><th>Meaning</th></tr>
-      <tr><td><code>201</code></td><td>Created. <code>routed_events</code> counts earlier unresolved webhooks (last 72 hours) that this registration just routed to you.</td></tr>
+      <tr><td><code>201</code></td><td>Created. <code>routed_events</code> counts earlier unresolved webhooks that this registration just routed to you (see below for which).</td></tr>
       <tr><td><code>200</code></td><td>You already own it. Registering is idempotent.</td></tr>
-      <tr><td><code>409 registration_conflict</code></td><td>Another application owns it.</td></tr>
+      <tr><td><code>409 registration_conflict</code></td><td>Another application owns it, or it falls under another application's <code>reference_prefixes</code> or a static route to another application.</td></tr>
       <tr><td><code>401</code> / <code>422</code> / <code>429</code></td><td>Bad token; invalid request (including a provider that isn't enabled, or <code>dedicated_account</code> for Flutterwave); or rate limited (10 requests per second per application, bursts of 20)</td></tr>
     </table>
     <p>Registrations are kept separately per provider. A Paystack registration of a reference never claims a
@@ -474,8 +477,17 @@ curl -X DELETE -H "Authorization: Bearer $APP_B_RELAY_TOKEN" http://127.0.0.1:80
         The original owner can claim them again.</li>
       <li><strong>Virtual accounts</strong> can move to another application only after the current owner deactivates
         them. Each deposit goes to whoever owned the account when it arrived.</li>
-      <li><strong>A registration never overrides a static route</strong> that points elsewhere. The event becomes
-        <code>ambiguous</code> and you resolve it.</li>
+      <li><strong>A registration never overrides a static route</strong> or another application's namespace. A
+        reference that starts with another application's <code>reference_prefixes</code>, or with a
+        <code>reference_prefix</code> routed to another application, is refused with <code>409</code>.</li>
+      <li><strong>Reference namespaces.</strong> Give each application <code>reference_prefixes</code> so nobody else
+        can register its references. An application that has them can only register references inside them, and
+        gets <code>422</code> for anything else.</li>
+      <li><strong>Webhooks that arrived first.</strong> A registration also routes matching unresolved webhooks that
+        arrived before it. Inside the application's own <code>reference_prefixes</code> it picks up any from the
+        last 72 hours. Anywhere else, including virtual accounts, it only picks up ones that arrived at most
+        15 minutes before the registration. Anything older stays <code>unresolved</code> for an operator to
+        <code>reroute</code>.</li>
     </ul>
 
     <!-- ───────────────────────────── Configuration -->
@@ -504,9 +516,12 @@ providers:                      # at least one provider
   paystack:
     secret_env: PAYSTACK_SECRET_KEY   # required: Paystack secret key (verifies x-paystack-signature)
     allowed_ips: []                   # optional source allowlist (IPs/CIDRs); empty = allow all
+    confirm_with_api: false           # check each routed event with Paystack's verify API before accepting it
   flutterwave:
     secret_hash_env: FLUTTERWAVE_SECRET_HASH  # required: dashboard secret hash (verif-hash / flutterwave-signature)
     allowed_ips: []                   # optional; Flutterwave's IPs change, so usually leave empty
+    confirm_with_api: false           # check each routed event with Flutterwave's verify API before accepting it
+    secret_key_env: FLUTTERWAVE_SECRET_KEY    # required with confirm_with_api: Flutterwave secret key (FLWSECK-...)
 
 applications:
   app_b:                         # application ID: lowercase letters, digits, _ or -
@@ -514,6 +529,7 @@ applications:
     signing_secret_env: APP_B_RELAY_SECRET            # required, ≥32 bytes, unique per app
     previous_signing_secret_env: APP_B_RELAY_SECRET_OLD  # optional, for rotation
     registration_token_env: APP_B_RELAY_TOKEN         # optional, ≥32 bytes, unique; enables the API
+    reference_prefixes: ["APPB_"]  # optional: references only this app may register
     payload_format: original    # original (default) | envelope
 
 routes:                         # static ownership rules
