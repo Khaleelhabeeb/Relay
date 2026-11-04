@@ -1,0 +1,854 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relay documentation</title>
+  <meta name="description" content="Install, configure and operate Relay, the self-hosted webhook router for Paystack and Flutterwave.">
+  <link rel="icon" href="assets/relay-logo.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <a class="logo" href="index.html" aria-label="Relay home">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/relay-logo-dark.png">
+        <img src="assets/relay-logo.png" alt="Relay">
+      </picture>
+    </a>
+    <nav>
+      <a href="index.html">Home</a>
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/khaleelhabeeb/relay">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="docs">
+  <aside class="sidebar">
+    <h4>Getting started</h4>
+    <ul>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#how-it-works">How it works</a></li>
+      <li><a href="#try-it-in-five-minutes">Try it in five minutes</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#set-up">Set up Relay</a></li>
+    </ul>
+    <h4>Integrating</h4>
+    <ul>
+      <li><a href="#receiving-events">Receiving events</a></li>
+      <li><a href="#verifying-the-signature">Verifying the signature</a></li>
+      <li><a href="#registering-ownership">Registering ownership</a></li>
+      <li><a href="#flutterwave">Flutterwave</a></li>
+      <li><a href="#go-library">Go library</a></li>
+    </ul>
+    <h4>Reference</h4>
+    <ul>
+      <li><a href="#configuration-reference">Configuration</a></li>
+      <li><a href="#production">Production</a></li>
+      <li><a href="#operating-relay">Operating Relay</a></li>
+      <li><a href="#switching">Switching to Relay</a></li>
+      <li><a href="#performance">Performance</a></li>
+      <li><a href="#faq">FAQ</a></li>
+      <li><a href="#development">Development</a></li>
+    </ul>
+  </aside>
+
+  <main class="content">
+    <h1 id="overview">Relay documentation</h1>
+    <p>Paystack and Flutterwave each send all webhooks for an account to <strong>one URL</strong>. If several of
+      your applications share that account, such as App A, App B and App C, you need something at that URL that
+      works out which application each payment belongs to and passes the event on to it.</p>
+    <p><strong>Relay</strong> is that piece. It receives your payment provider's webhooks, verifies them, decides
+      which application owns each event, stores it safely and then delivers it to that application with its own
+      signature. If an application is down, Relay retries for up to 24 hours. If no application, or more than one,
+      can be identified as the owner, Relay holds the event for you to resolve. It never guesses and never
+      broadcasts payment data.</p>
+    <ul>
+      <li><strong>One binary, no infrastructure.</strong> Embedded SQLite. No Redis, no message queue, no dashboard to host.</li>
+      <li><strong>Safe by default.</strong> Signatures are verified on the exact bytes the provider sent. Relay answers
+        the provider only after the event is committed to disk. Delivery is at least once, and recipients deduplicate
+        on a stable event ID.</li>
+      <li><strong>Language-agnostic.</strong> Your applications receive a plain signed HTTP POST, so no SDK is needed.</li>
+      <li><strong>Paystack and Flutterwave.</strong> Enable either one, or both side by side. Each provider has its own
+        endpoint, <code>/webhooks/paystack</code> or <code>/webhooks/flutterwave</code>. Most examples use Paystack;
+        the <a href="#flutterwave">Flutterwave</a> section covers what's different.</li>
+    </ul>
+    <div class="note">Relay does <strong>not</strong> process payments, hold money or replace checking a transaction
+      with your payment provider.</div>
+
+    <!-- ───────────────────────────── How it works -->
+    <h2 id="how-it-works">How it works</h2>
+<pre><code>                            ┌──────────────────────── Relay ─────────────────────────┐
+ Paystack    ── webhook ──▶ │ verify signature ─▶ find owner ─▶ save to SQLite ─▶ 200 │
+ Flutterwave ── webhook ──▶ │                                          │             │
+                            │                         delivery workers ◀┘             │
+                            └──────────────┬──────────────────┬────────────────────────┘
+                                           ▼                  ▼
+                                         App A              App B         (signed POSTs,
+                                                                          retried on failure)</code></pre>
+    <ol>
+      <li>The provider posts a webhook to Relay. Paystack posts to
+        <code>https://relay.example.com/webhooks/paystack</code>, and Flutterwave to
+        <code>https://relay.example.com/webhooks/flutterwave</code>.</li>
+      <li>Relay checks the signature against the raw request body. For Paystack that's
+        <code>x-paystack-signature</code>, made with your secret key. For Flutterwave it's
+        <code>flutterwave-signature</code> or <code>verif-hash</code>, made with your secret hash. Forged requests
+        are rejected.</li>
+      <li>Relay finds the owner. It looks at the transaction's <strong>reference prefix</strong>, its
+        <strong>metadata</strong>, and any <strong>references or virtual accounts your applications registered</strong>
+        through Relay's API.</li>
+      <li>Relay saves the event and the decision in one database transaction, and only then answers the provider
+        with <code>200</code>.</li>
+      <li>A background worker sends the event to the owning application and retries with backoff until it gets a
+        <code>2xx</code>.</li>
+    </ol>
+    <table>
+      <tr><th>What Relay found</th><th>Status</th><th>What happens</th></tr>
+      <tr><td>Exactly one owning application</td><td><code>matched</code></td><td>Delivered</td></tr>
+      <tr><td>No owner</td><td><code>unresolved</code></td><td>Held. You add a rule, the app registers the reference, or you assign it from the CLI.</td></tr>
+      <tr><td>Conflicting owners</td><td><code>ambiguous</code></td><td>Held. You decide from the CLI.</td></tr>
+      <tr><td>An event type Relay doesn't route yet</td><td><code>unsupported</code></td><td>Stored for audit, nothing to do</td></tr>
+    </table>
+    <p>Relay currently routes successful charges:</p>
+    <ul>
+      <li><strong>Paystack:</strong> <code>charge.success</code>, both checkout payments and deposits into dedicated virtual accounts.</li>
+      <li><strong>Flutterwave:</strong> <code>charge.completed</code>.</li>
+    </ul>
+    <p>Refunds, transfers, disputes and subscriptions are stored but not forwarded yet; see the <a href="#faq">FAQ</a>.
+      Customer IDs and emails are never used to decide ownership, because one customer can pay several of your
+      applications.</p>
+
+    <!-- ───────────────────────────── Try it -->
+    <h2 id="try-it-in-five-minutes">Try it in five minutes</h2>
+    <p>This runs Relay with two small demo applications on your machine and sends it a sample Paystack event. You
+      need Docker, <code>openssl</code> and <code>curl</code>.</p>
+<pre><code>git clone https://github.com/khaleelhabeeb/relay.git
+cd relay</code></pre>
+    <p>Create the secrets file for the demo:</p>
+<pre><code>cat &gt; examples/.env &lt;&lt;EOF
+PAYSTACK_SECRET_KEY=sk_test_demo_only
+APP_A_RELAY_SIGNING_SECRET=$(openssl rand -hex 32)
+APP_A_RELAY_API_TOKEN=$(openssl rand -hex 32)
+APP_B_RELAY_SIGNING_SECRET=$(openssl rand -hex 32)
+APP_B_RELAY_API_TOKEN=$(openssl rand -hex 32)
+EOF</code></pre>
+    <p>Start Relay and the two demo applications, <code>app_a</code> and <code>app_b</code>:</p>
+<pre><code>docker compose -f examples/docker-compose.yml --env-file examples/.env up --build</code></pre>
+    <p>In a second terminal, sign a sample payment the way Paystack would and send it. Its reference starts with
+      <code>APPA_</code>, so it belongs to <code>app_a</code>:</p>
+<pre><code>PAYSTACK_SECRET_KEY=sk_test_demo_only examples/send-fixture.sh testdata/paystack/charge_success_checkout.json</code></pre>
+    <p>You'll see the <code>app_a</code> container log the event with a verified signature. Send
+      <code>testdata/paystack/charge_success_metadata_object.json</code> and <code>app_b</code> receives it instead,
+      because its metadata says <code>"application": "app_b"</code>.</p>
+
+    <!-- ───────────────────────────── Install -->
+    <h2 id="install">Install</h2>
+    <table>
+      <tr><th>Method</th><th>Command</th></tr>
+      <tr><td>Go toolchain (1.26+)</td><td><code>go install github.com/khaleelhabeeb/relay/cmd/relay@latest</code></td></tr>
+      <tr><td>From source</td><td><code>git clone https://github.com/khaleelhabeeb/relay.git &amp;&amp; cd relay &amp;&amp; make build</code>, which produces <code>bin/relay</code></td></tr>
+      <tr><td>Docker (build locally)</td><td><code>docker build -t relay .</code></td></tr>
+      <tr><td>As a Go library</td><td><code>go get github.com/khaleelhabeeb/relay@latest</code>; see <a href="#go-library">Go library</a></td></tr>
+      <tr><td>Release binaries and image</td><td>Published to <a href="https://github.com/khaleelhabeeb/relay/releases">GitHub Releases</a> and <code>ghcr.io/khaleelhabeeb/relay</code> for every version tag</td></tr>
+    </table>
+    <p>Check the install:</p>
+<pre><code>relay --version</code></pre>
+
+    <!-- ───────────────────────────── Set up -->
+    <h2 id="set-up">Set up Relay for your applications</h2>
+
+    <h3>1. Describe your applications</h3>
+    <p>Create <code>relay.yaml</code>. Each application needs a URL that Relay delivers to and its own signing
+      secret. Secrets are never written in the file. Each <code>*_env</code> setting names an environment variable
+      that holds the value.</p>
+<pre><code>server:
+  listen: ":8080"                # webhooks from your providers (put HTTPS in front of this)
+  api_listen: "127.0.0.1:8081"   # registration API and metrics, kept off the internet
+
+storage:
+  dsn: "/var/lib/relay/relay.db"
+
+providers:                                    # enable one or both
+  paystack:
+    secret_env: PAYSTACK_SECRET_KEY           # your Paystack secret key (sk_live_… or sk_test_…)
+  flutterwave:
+    secret_hash_env: FLUTTERWAVE_SECRET_HASH  # the secret hash from Flutterwave's webhook settings
+
+applications:
+  app_a:
+    endpoint: "https://app-a.yourdomain.com/webhooks/relay"
+    signing_secret_env: APP_A_RELAY_SECRET   # Relay signs deliveries to this app with it
+  app_b:
+    endpoint: "https://app-b.yourdomain.com/webhooks/relay"
+    signing_secret_env: APP_B_RELAY_SECRET
+    registration_token_env: APP_B_RELAY_TOKEN  # optional: lets this app use the registration API
+    payload_format: envelope                  # optional: wrap the provider's event in Relay metadata
+
+routes:
+  - application: app_a
+    match:
+      reference_prefix: "APPA_"
+  - application: app_b
+    match:
+      metadata:
+        app: "app_b"</code></pre>
+    <p>Generate a secret for each application. Each must be at least 32 bytes and different from the others:</p>
+<pre><code>openssl rand -hex 32</code></pre>
+    <p>Then check the file:</p>
+<pre><code>relay config validate -c relay.yaml</code></pre>
+    <p>Validation reports every problem at once: a missing variable, an <code>http://</code> endpoint, two routes
+      that would both claim the same payment, and so on. Every option is listed in the
+      <a href="#configuration-reference">configuration reference</a>.</p>
+
+    <h3>2. Tag each payment with its owner</h3>
+    <p>When your application starts a transaction, include something Relay can recognise. Pick one approach per
+      application. For Flutterwave, the reference is <code>tx_ref</code> and the metadata is <code>meta</code>, as
+      shown in <a href="#flutterwave">Flutterwave</a>.</p>
+    <p><strong>A reference prefix.</strong> Start every reference with the application's prefix:</p>
+<pre><code>curl https://api.paystack.co/transaction/initialize \
+  -H "Authorization: Bearer $PAYSTACK_SECRET_KEY" -H "Content-Type: application/json" \
+  -d '{"email":"parent@example.com","amount":500000,"reference":"APPA_INV_10293"}'</code></pre>
+    <p><strong>Metadata.</strong> Add a marker to the transaction's metadata:</p>
+<pre><code>{ "email": "buyer@example.com", "amount": 250000, "metadata": { "app": "app_b" } }</code></pre>
+    <p><strong>Registration.</strong> The application registers the reference, or (Paystack only) a dedicated
+      virtual account, with Relay's API on the private <code>api_listen</code> address. This suits virtual-account
+      deposits, whose references are generated by Paystack. See <a href="#registering-ownership">Registering ownership</a>.</p>
+<pre><code>curl -X POST http://127.0.0.1:8081/v1/registrations \
+  -H "Authorization: Bearer $APP_B_RELAY_TOKEN" \
+  -d '{"provider":"paystack","type":"dedicated_account","bank":"Wema Bank","account_number":"9930000902"}'</code></pre>
+    <p>If a webhook arrives before its registration, Relay holds it. It routes the event automatically as soon as
+      the registration arrives, for events up to 72 hours old.</p>
+
+    <h3>3. Accept Relay's deliveries in each application</h3>
+    <p>Add an endpoint that does three things:</p>
+    <ol>
+      <li><strong>Verifies the signature.</strong> See <a href="#verifying-the-signature">Verifying the signature</a>.</li>
+      <li><strong>Ignores repeats.</strong> If you've already processed this <code>X-Relay-Event-ID</code>, return <code>200</code> and stop.</li>
+      <li><strong>Responds quickly with <code>2xx</code>.</strong> Do slow work afterwards.</li>
+    </ol>
+    <p>With <code>payload_format: original</code> (the default), the body is exactly what the provider sent. Your
+      existing Paystack or Flutterwave handling code keeps working, and only the signature check changes. The
+      <code>X-Relay-Provider</code> header says which provider the event came from.</p>
+
+    <h3>4. Run Relay behind HTTPS</h3>
+<pre><code>export PAYSTACK_SECRET_KEY=sk_live_...          # if paystack is enabled
+export FLUTTERWAVE_SECRET_HASH=...              # if flutterwave is enabled
+export APP_A_RELAY_SECRET=...
+export APP_B_RELAY_SECRET=...
+export APP_B_RELAY_TOKEN=...
+relay serve -c relay.yaml</code></pre>
+    <p>Put a reverse proxy (Caddy, nginx, a cloud load balancer) in front of it to terminate TLS, and expose only
+      <code>POST /webhooks/paystack</code> and/or <code>POST /webhooks/flutterwave</code> to the internet. There's a
+      Docker setup in <a href="#production">Running Relay in production</a>.</p>
+
+    <h3>5. Point your provider at Relay</h3>
+    <p><strong>Paystack:</strong> in the Paystack Dashboard, go to <strong>Settings → API Keys &amp; Webhooks</strong>
+      and set the webhook URL to your Relay address followed by <code>/webhooks/paystack</code>, for example
+      <code>https://relay.yourdomain.com/webhooks/paystack</code>.</p>
+    <p><strong>Flutterwave:</strong> in <strong>Settings → Webhooks</strong>, set the URL to
+      <code>https://relay.yourdomain.com/webhooks/flutterwave</code> and the secret hash to the value of
+      <code>FLUTTERWAVE_SECRET_HASH</code>, and turn on retries.</p>
+    <div class="note">Try it with your <strong>test</strong> keys first. Make a test payment for each application and
+      confirm it arrives, and that nothing appears in <code>relay events list --status unresolved</code>. Before you
+      switch live traffic, read <a href="#switching">Switching Paystack or Flutterwave to Relay</a>.</div>
+
+    <!-- ───────────────────────────── Receiving -->
+    <h2 id="receiving-events">Receiving events</h2>
+    <p>Relay sends a <code>POST</code> to the application's <code>endpoint</code> for each event it owns.</p>
+<pre><code>POST /webhooks/relay HTTP/1.1
+Content-Type: application/json
+User-Agent: Relay/&lt;version&gt;
+X-Relay-Event-ID: evt_01JBQ7Z3K9X2R4T6V8W0Y2A4C6     ← stable for this event; deduplicate on it
+X-Relay-Delivery-ID: del_01JBQ7Z3M4ABCDEFGHJKMNPQRS
+X-Relay-Timestamp: 1793570000
+X-Relay-Attempt: 1
+X-Relay-Provider: paystack                     ← or flutterwave
+X-Relay-Signature: v1=fe8e97a7670f414a34ec2115f47bcda1ff597e880bfe6c5edf3b823ff2b12b7f
+
+{"event":"charge.success","data":{ ... exactly as the provider sent it ... }}</code></pre>
+    <table>
+      <tr><td><strong>Body, <code>original</code> format</strong> (default)</td><td>The exact bytes the provider sent</td></tr>
+      <tr><td><strong><code>X-Relay-Provider</code></strong></td><td><code>paystack</code> or <code>flutterwave</code>. It isn't signed; the body itself identifies the provider.</td></tr>
+      <tr><td><strong>Body, <code>envelope</code> format</strong></td><td><code>{"relay_version":1,"id":"evt_…","type":"charge.success","provider":"paystack","application":"app_b","received_at":"2026-11-02T10:15:42.123Z","payload":{ original event, byte for byte }}</code></td></tr>
+      <tr><td><strong>Success</strong></td><td>Any <code>2xx</code> response</td></tr>
+      <tr><td><strong>Retried</strong></td><td>Timeouts, connection errors, non-<code>2xx</code> responses and redirects (never followed). By default 10 attempts over about 24 hours: immediately, then after 30s, 2m, 10m, 30m, 1h, 2h, 4h, 8h and 8h, each ±20%.</td></tr>
+      <tr><td><strong>After the last attempt</strong></td><td>The delivery is marked <code>exhausted</code>. Replay it with <code>relay deliveries retry</code>.</td></tr>
+      <tr><td><strong>Timeout per attempt</strong></td><td><code>delivery.timeout_seconds</code>, 10 by default</td></tr>
+    </table>
+
+    <h3 id="verifying-the-signature">Verifying the signature</h3>
+    <ol>
+      <li>Read the <strong>raw</strong> request body. Don't parse and re-serialize it first.</li>
+      <li>Reject the request if <code>X-Relay-Timestamp</code> is more than <strong>5 minutes</strong> away from your clock.</li>
+      <li>Build the signed message by concatenating these bytes:
+        <code>v1:</code> + timestamp + <code>:</code> + event ID + <code>:</code> + delivery ID + <code>:</code> + raw body</li>
+      <li>Compute the HMAC-SHA256 of that message with your application's signing secret, hex-encoded.</li>
+      <li><code>X-Relay-Signature</code> holds one or more comma-separated <code>v1=&lt;hex&gt;</code> values. During a
+        secret rotation it holds two. Accept the request if <strong>any</strong> of them matches, comparing in
+        constant time.</li>
+    </ol>
+    <p>The event ID is part of the signed message. That stops anyone from replaying a captured request under a
+      different event ID to get past your deduplication.</p>
+
+    <details>
+      <summary>Python (FastAPI)</summary>
+<pre><code>import hashlib, hmac, time
+from fastapi import FastAPI, Request, HTTPException
+
+SECRET = b"..."  # RELAY signing secret for this app
+app = FastAPI()
+
+def relay_verified(headers, body: bytes, tolerance: int = 300) -&gt; bool:
+    ts = headers.get("x-relay-timestamp", "")
+    if not ts.isdigit() or abs(time.time() - int(ts)) &gt; tolerance:
+        return False
+    msg = f"v1:{ts}:{headers.get('x-relay-event-id', '')}:{headers.get('x-relay-delivery-id', '')}:".encode() + body
+    expected = hmac.new(SECRET, msg, hashlib.sha256).hexdigest()
+    return any(p.strip().startswith("v1=") and hmac.compare_digest(p.strip()[3:], expected)
+               for p in headers.get("x-relay-signature", "").split(","))
+
+@app.post("/webhooks/relay")
+async def relay_webhook(request: Request):
+    body = await request.body()
+    if not relay_verified(request.headers, body):
+        raise HTTPException(401)
+    event_id = request.headers["x-relay-event-id"]
+    # if already_processed(event_id): return {"ok": True}
+    # ... verify the transaction with your provider, apply effects, record event_id in the same DB transaction
+    return {"ok": True}</code></pre>
+    </details>
+
+    <details>
+      <summary>PHP (Laravel)</summary>
+<pre><code>function relay_verified(string $secret, \Illuminate\Http\Request $request, int $tolerance = 300): bool
+{
+    $ts = (string) $request-&gt;header('X-Relay-Timestamp', '');
+    if (!ctype_digit($ts) || abs(time() - (int) $ts) &gt; $tolerance) {
+        return false;
+    }
+    $message = 'v1:' . $ts . ':' . $request-&gt;header('X-Relay-Event-ID', '') . ':'
+        . $request-&gt;header('X-Relay-Delivery-ID', '') . ':' . $request-&gt;getContent();
+    $expected = hash_hmac('sha256', $message, $secret);
+    foreach (explode(',', (string) $request-&gt;header('X-Relay-Signature', '')) as $part) {
+        $part = trim($part);
+        if (str_starts_with($part, 'v1=') &amp;&amp; hash_equals($expected, substr($part, 3))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Route::post('/webhooks/relay', function (\Illuminate\Http\Request $request) {
+    abort_unless(relay_verified(config('services.relay.secret'), $request), 401);
+    $eventId = $request-&gt;header('X-Relay-Event-ID');
+    // Deduplicate on $eventId, verify with your provider, then fulfil.
+    return response()-&gt;noContent();
+});</code></pre>
+      <p>Exclude this route from CSRF protection.</p>
+    </details>
+
+    <details>
+      <summary>Node.js (Next.js route handler)</summary>
+<pre><code>import crypto from "node:crypto";
+
+export function relayVerified(secret: string, headers: Headers, body: Buffer, toleranceSec = 300): boolean {
+  const ts = headers.get("x-relay-timestamp") ?? "";
+  if (!/^\d+$/.test(ts) || Math.abs(Date.now() / 1000 - Number(ts)) &gt; toleranceSec) return false;
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(`v1:${ts}:${headers.get("x-relay-event-id") ?? ""}:${headers.get("x-relay-delivery-id") ?? ""}:`)
+    .update(body)
+    .digest();
+  return (headers.get("x-relay-signature") ?? "").split(",").some((part) =&gt; {
+    const p = part.trim();
+    if (!p.startsWith("v1=")) return false;
+    const got = Buffer.from(p.slice(3), "hex");
+    return got.length === expected.length &amp;&amp; crypto.timingSafeEqual(got, expected);
+  });
+}
+
+// app/webhooks/relay/route.ts
+export async function POST(req: Request) {
+  const body = Buffer.from(await req.arrayBuffer());
+  if (!relayVerified(process.env.RELAY_SIGNING_SECRET!, req.headers, body)) {
+    return new Response("invalid signature", { status: 401 });
+  }
+  const eventId = req.headers.get("x-relay-event-id")!;
+  // Deduplicate on eventId, verify with your provider, then fulfil.
+  return new Response(null, { status: 204 });
+}</code></pre>
+    </details>
+
+    <details>
+      <summary>Go</summary>
+      <p>Package <a href="https://pkg.go.dev/github.com/khaleelhabeeb/relay/receiver"><code>receiver</code></a> does this for you:</p>
+<pre><code>http.Handle("/webhooks/relay", receiver.Handler(secret, func(ctx context.Context, d *receiver.Delivery) error {
+	// deduplicate on d.EventID, then process d.Body; an error makes Relay retry
+	return nil
+}))</code></pre>
+      <p>Without the dependency:</p>
+<pre><code>func RelayVerified(secret string, h http.Header, body []byte, now time.Time) bool {
+	ts := h.Get("X-Relay-Timestamp")
+	sec, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil || now.Sub(time.Unix(sec, 0)).Abs() &gt; 5*time.Minute {
+		return false
+	}
+	m := hmac.New(sha256.New, []byte(secret))
+	m.Write([]byte("v1:" + ts + ":" + h.Get("X-Relay-Event-ID") + ":" + h.Get("X-Relay-Delivery-ID") + ":"))
+	m.Write(body)
+	want := m.Sum(nil)
+	for _, part := range strings.Split(h.Get("X-Relay-Signature"), ",") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(part), "v1="); ok {
+			if got, err := hex.DecodeString(v); err == nil &amp;&amp; hmac.Equal(got, want) {
+				return true
+			}
+		}
+	}
+	return false
+}</code></pre>
+    </details>
+
+    <p><strong>Test vector.</strong> Check your code against this. Turn off the timestamp check while you do,
+      because the timestamp is fixed in the past.</p>
+    <table>
+      <tr><th>Input</th><th>Value</th></tr>
+      <tr><td>secret</td><td><code>whsec_test_0123456789abcdef0123456789abcdef</code></td></tr>
+      <tr><td>timestamp</td><td><code>1793570000</code></td></tr>
+      <tr><td>event ID</td><td><code>evt_01JABC</code></td></tr>
+      <tr><td>delivery ID</td><td><code>del_01JXYZ</code></td></tr>
+      <tr><td>body</td><td><code>{"event":"charge.success"}</code></td></tr>
+      <tr><td>signature</td><td><code>v1=fe8e97a7670f414a34ec2115f47bcda1ff597e880bfe6c5edf3b823ff2b12b7f</code></td></tr>
+    </table>
+
+    <h3>Your application's responsibilities</h3>
+    <ul>
+      <li><strong>Deduplicate on <code>X-Relay-Event-ID</code>.</strong> Delivery is at least once. A request can
+        succeed at your end and still be retried, for example if Relay crashes before it records the result. Record
+        the event ID in the same database transaction as the business effect. <code>X-Relay-Delivery-ID</code> and
+        <code>X-Relay-Attempt</code> are for diagnostics only.</li>
+      <li><strong>Respond quickly.</strong> Do slow work after you respond.</li>
+      <li><strong>Verify the payment with Paystack or Flutterwave</strong> before granting value: check amount,
+        currency, status and reference. A valid Relay signature proves the request came from Relay, not that the
+        payment meets your business rules.</li>
+    </ul>
+
+    <!-- ───────────────────────────── Registering -->
+    <h2 id="registering-ownership">Registering ownership</h2>
+    <p>Static routes (reference prefix or metadata) cover most applications. When neither fits, for example with
+      dedicated virtual accounts, an application can register identifiers through Relay's API with its own
+      <code>registration_token</code>. The token alone decides which application the request acts for. The API
+      listens on <code>server.api_listen</code> if you set it (recommended), otherwise on the main port.</p>
+    <table>
+      <tr><th>Request</th><th>Purpose</th></tr>
+      <tr><td><code>POST /v1/registrations</code></td><td>Claim an identifier</td></tr>
+      <tr><td><code>GET /v1/registrations?type=&amp;active=&amp;limit=&amp;after=</code></td><td>List your own registrations, paginated (<code>limit</code> 1–500, follow <code>next</code>)</td></tr>
+      <tr><td><code>DELETE /v1/registrations/{id}</code></td><td>Deactivate one of your registrations</td></tr>
+    </table>
+<pre><code># A transaction reference, before or after the payment ("provider" is paystack or flutterwave)
+curl -X POST http://127.0.0.1:8081/v1/registrations \
+  -H "Authorization: Bearer $APP_B_RELAY_TOKEN" \
+  -d '{"provider":"paystack","type":"transaction_reference","value":"APPB_ORDER_1001"}'
+
+# A dedicated virtual account (Paystack only; bank name and account number from Paystack)
+curl -X POST http://127.0.0.1:8081/v1/registrations \
+  -H "Authorization: Bearer $APP_B_RELAY_TOKEN" \
+  -d '{"provider":"paystack","type":"dedicated_account","bank":"Wema Bank","account_number":"9930000902"}'
+
+curl -H "Authorization: Bearer $APP_B_RELAY_TOKEN" "http://127.0.0.1:8081/v1/registrations?type=dedicated_account"
+curl -X DELETE -H "Authorization: Bearer $APP_B_RELAY_TOKEN" http://127.0.0.1:8081/v1/registrations/reg_01J...</code></pre>
+    <table>
+      <tr><th>Response</th><th>Meaning</th></tr>
+      <tr><td><code>201</code></td><td>Created. <code>routed_events</code> counts earlier unresolved webhooks (last 72 hours) that this registration just routed to you.</td></tr>
+      <tr><td><code>200</code></td><td>You already own it. Registering is idempotent.</td></tr>
+      <tr><td><code>409 registration_conflict</code></td><td>Another application owns it.</td></tr>
+      <tr><td><code>401</code> / <code>422</code> / <code>429</code></td><td>Bad token; invalid request (including a provider that isn't enabled, or <code>dedicated_account</code> for Flutterwave); or rate limited (10 requests per second per application, bursts of 20)</td></tr>
+    </table>
+    <p>Registrations are kept separately per provider. A Paystack registration of a reference never claims a
+      Flutterwave event with the same reference, and the reverse holds too.</p>
+    <p><strong>Who can claim what:</strong></p>
+    <ul>
+      <li><strong>Transaction references</strong> can never move to another application, even after deactivation.
+        The original owner can claim them again.</li>
+      <li><strong>Virtual accounts</strong> can move to another application only after the current owner deactivates
+        them. Each deposit goes to whoever owned the account when it arrived.</li>
+      <li><strong>A registration never overrides a static route</strong> that points elsewhere. The event becomes
+        <code>ambiguous</code> and you resolve it.</li>
+    </ul>
+
+    <!-- ───────────────────────────── Configuration -->
+    <h2 id="configuration-reference">Configuration reference</h2>
+    <p>Relay reads one YAML file, set with <code>--config</code>. Unknown keys are rejected. Secrets never go in the
+      file: each <code>*_env</code> field names an environment variable. <code>relay config validate</code> checks
+      everything, including that those variables are set.</p>
+    <details>
+      <summary>All options</summary>
+<pre><code>version: 1                      # optional; only 1 is supported
+
+server:
+  listen: ":8080"               # webhooks, /healthz, /readyz (and the API/metrics unless api_listen is set)
+  api_listen: "127.0.0.1:8081"  # optional private listener for /v1/registrations and /metrics
+  public_base_url: "https://relay.example.com"   # informational
+  max_body_bytes: 1048576       # inbound webhook cap (default 1 MiB, max 16 MiB)
+  max_concurrent_webhooks: 256  # webhooks processed at once; excess get 503 + Retry-After (the provider retries)
+  metrics: false                # expose GET /metrics (Prometheus)
+  trusted_proxies: []           # IPs/CIDRs of your reverse proxies (needed for allowed_ips behind a proxy)
+
+storage:
+  driver: sqlite                # only sqlite
+  dsn: "/var/lib/relay/relay.db"  # local disk only; Relay creates the directory (0700) and file (0600)
+
+providers:                      # at least one provider
+  paystack:
+    secret_env: PAYSTACK_SECRET_KEY   # required: Paystack secret key (verifies x-paystack-signature)
+    allowed_ips: []                   # optional source allowlist (IPs/CIDRs); empty = allow all
+  flutterwave:
+    secret_hash_env: FLUTTERWAVE_SECRET_HASH  # required: dashboard secret hash (verif-hash / flutterwave-signature)
+    allowed_ips: []                   # optional; Flutterwave's IPs change, so usually leave empty
+
+applications:
+  app_b:                         # application ID: lowercase letters, digits, _ or -
+    endpoint: "https://app-b.yourdomain.com/webhooks/relay"
+    signing_secret_env: APP_B_RELAY_SECRET            # required, ≥32 bytes, unique per app
+    previous_signing_secret_env: APP_B_RELAY_SECRET_OLD  # optional, for rotation
+    registration_token_env: APP_B_RELAY_TOKEN         # optional, ≥32 bytes, unique; enables the API
+    payload_format: original    # original (default) | envelope
+
+routes:                         # static ownership rules
+  - application: app_b
+    provider: paystack          # optional: only events from this provider; omitted = every provider
+    match:
+      reference_prefix: "APPB_" # reference starts with this (case-sensitive): Paystack data.reference, Flutterwave data.tx_ref
+      metadata:                 # every key equals its value (Paystack data.metadata; Flutterwave data.meta / meta_data)
+        app: "app_b"             # both matchers set: both must match
+
+delivery:
+  max_attempts: 10              # per cycle; a manual retry starts a new cycle (1–50)
+  timeout_seconds: 10           # per attempt (1–120)
+  worker_count: 8               # concurrent deliveries (1–256)
+  retry_schedule: [0s, 30s, 2m, 10m, 30m, 1h, 2h, 4h, 8h, 8h]  # delay before attempt N; last repeats; ±20% jitter
+  allow_insecure_local: false   # DEVELOPMENT ONLY: allow http:// and private/loopback destinations
+
+retention:
+  payload_days: 90              # clear raw payloads this long after successful delivery
+  attempt_days: 90              # delete attempt history older than this</code></pre>
+    </details>
+    <h3>Validation rules</h3>
+    <ul>
+      <li><strong>Applications:</strong> at least one is required. Signing secrets and registration tokens must each
+        be at least 32 bytes and different for every application.</li>
+      <li><strong>Endpoints:</strong> must use <code>https</code>, carry no credentials, and must not be
+        <code>localhost</code> or a private IP. Relay also checks the resolved address every time it connects, which
+        blocks DNS tricks. <code>allow_insecure_local</code> turns these checks off for local development only.</li>
+      <li><strong>Routes:</strong> two routes to different applications are rejected if one always matches whenever
+        the other does, for example prefixes <code>APPA_</code> and <code>APPA_ED_</code>, or identical metadata
+        matches. Overlaps that depend on the individual payment are caught at runtime, and the event becomes
+        <code>ambiguous</code>. Routes scoped to different <code>provider</code>s never overlap. A route's
+        <code>provider</code> must be configured.</li>
+    </ul>
+    <details>
+      <summary>Rotating an application's signing secret</summary>
+      <ol>
+        <li>Set <code>previous_signing_secret_env</code> to the current secret and <code>signing_secret_env</code> to
+          the new one. Restart Relay. Each request now carries two <code>v1=</code> signatures.</li>
+        <li>Deploy the new secret to the application. It accepts either signature in the meantime.</li>
+        <li>Remove <code>previous_signing_secret_env</code> and restart again.</li>
+      </ol>
+    </details>
+    <details>
+      <summary>Restricting webhooks to your provider's IP addresses (optional)</summary>
+      <p>Signature verification is what actually protects the endpoint. An allowlist adds defence in depth.
+        Paystack publishes its webhook source IPs: <code>52.31.139.75</code>, <code>52.49.173.169</code> and
+        <code>52.214.14.220</code>. Check Paystack's documentation for changes before relying on them.</p>
+<pre><code>providers:
+  paystack:
+    allowed_ips: ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
+server:
+  trusted_proxies: ["10.0.0.0/8"]   # the addresses your reverse proxy connects from</code></pre>
+      <ul>
+        <li><strong>Without <code>trusted_proxies</code>,</strong> the client is the direct TCP peer.</li>
+        <li><strong>Behind a trusted proxy,</strong> Relay uses the rightmost <code>X-Forwarded-For</code> address
+          that isn't itself a trusted proxy. It never trusts entries further left, because clients can forge them.</li>
+        <li><strong>Rejected requests</strong> get <code>403</code>.</li>
+        <li><strong>Each provider has its own <code>allowed_ips</code>.</strong> Flutterwave says its IP addresses are
+          dynamic, so leave <code>providers.flutterwave.allowed_ips</code> empty unless Flutterwave gives you a fixed
+          list.</li>
+      </ul>
+    </details>
+
+    <!-- ───────────────────────────── Production -->
+    <h2 id="production">Running Relay in production</h2>
+<pre><code>docker build -t relay .
+docker volume create relay-data
+docker run -d --name relay --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 \
+  --env-file /etc/relay/relay.env \
+  -v /etc/relay/relay.yaml:/etc/relay/relay.yaml:ro \
+  -v relay-data:/var/lib/relay \
+  relay</code></pre>
+    <p>The image is distroless, runs as a non-root user and keeps its data in the <code>/var/lib/relay</code> volume.
+      Set <code>storage.dsn: /var/lib/relay/relay.db</code> in the config you mount.</p>
+    <ul>
+      <li><strong>Run one Relay per database.</strong> A lock file prevents a second instance. Keep the database on a
+        local disk, not a network share.</li>
+      <li><strong>Expose only the webhook endpoint.</strong> Terminate TLS at a reverse proxy, publish only
+        <code>POST /webhooks/paystack</code> and/or <code>POST /webhooks/flutterwave</code>, and keep
+        <code>api_listen</code> on a private interface.</li>
+    </ul>
+
+    <h3>Health checks and metrics</h3>
+    <table>
+      <tr><th>Endpoint</th><th>Meaning</th></tr>
+      <tr><td><code>GET /healthz</code></td><td>The process is serving (liveness)</td></tr>
+      <tr><td><code>GET /readyz</code></td><td>The database answers and accepts a write (readiness). Fails on a full disk or read-only database.</td></tr>
+      <tr><td><code>GET /metrics</code></td><td>Prometheus metrics, with <code>server.metrics: true</code>, served on <code>api_listen</code> when set</td></tr>
+    </table>
+    <table>
+      <tr><th>Alert on</th><th>Because</th></tr>
+      <tr><td><code>relay_events_unrouted{status="unresolved"}</code> or <code>{status="ambiguous"}</code> above 0 for 15 minutes</td><td>A payment has no owner</td></tr>
+      <tr><td><code>relay_deliveries{status="exhausted"}</code> above 0</td><td>An application missed events and needs a replay</td></tr>
+      <tr><td><code>relay_oldest_pending_delivery_age_seconds</code> above 3600</td><td>An application has been failing for a long time</td></tr>
+      <tr><td><code>relay_webhooks_received_total{result="storage_error"}</code> rising (labelled by <code>provider</code>)</td><td>Relay can't save events; check the disk</td></tr>
+      <tr><td><code>relay_webhooks_received_total{result="invalid_signature"}</code> rising</td><td>Wrong Paystack secret key or Flutterwave secret hash (see the <code>provider</code> label), or someone probing the endpoint</td></tr>
+      <tr><td><code>relay_store_up</code> equal to 0</td><td>The database can't be read</td></tr>
+    </table>
+    <p>Logs are JSON on stderr. They carry <code>event_id</code>, <code>delivery_id</code> and
+      <code>application</code>, and never contain payment payloads or secrets.</p>
+
+    <h3>Backups, upgrades and retention</h3>
+    <ul>
+      <li><strong>Back up</strong> while Relay runs. The file contains payment events, so encrypt it:
+        <code>sqlite3 /var/lib/relay/relay.db "VACUUM INTO '/backups/relay-$(date +%F).db'"</code></li>
+      <li><strong>Restore:</strong> stop Relay, put the backup in place as <code>relay.db</code>, delete
+        <code>relay.db-wal</code> and <code>relay.db-shm</code>, then start Relay. To recover events received since
+        the backup, resend them from Paystack or Flutterwave. Duplicates are ignored.</li>
+      <li><strong>Upgrade:</strong> back up, stop the old version and start the new one. Schema migrations run on
+        startup. Deliveries that were in flight are resumed first. Use the CLI from the same version as the server;
+        it refuses a mismatched database.</li>
+      <li><strong>Retention:</strong> every 6 hours Relay clears raw payloads of delivered and
+        <code>unsupported</code> events older than <code>retention.payload_days</code>, and deletes attempt history
+        older than <code>retention.attempt_days</code>. Events that are unresolved, ambiguous, pending or exhausted
+        keep their payloads until they're resolved.</li>
+    </ul>
+
+    <!-- ───────────────────────────── Operating -->
+    <h2 id="operating-relay">Operating Relay</h2>
+    <p>The <code>relay</code> CLI works against a running server. It only needs the config file, not the secrets.</p>
+    <table>
+      <tr><th>Task</th><th>Command</th></tr>
+      <tr><td>See payments nobody claimed</td><td><code>relay events list --status unresolved</code></td></tr>
+      <tr><td>Full history of one event</td><td><code>relay events inspect evt_…</code> (add <code>--show-payload</code> to print the payment data)</td></tr>
+      <tr><td>Re-run routing after adding a rule</td><td><code>relay events reprocess</code></td></tr>
+      <tr><td>Assign an owner yourself (recorded with a reason)</td><td><code>relay events reroute evt_… --application app_b --reason "ticket 42"</code></td></tr>
+      <tr><td>See deliveries an application missed</td><td><code>relay deliveries list --status exhausted</code></td></tr>
+      <tr><td>Replay them once the application is back</td><td><code>relay deliveries retry del_…</code></td></tr>
+      <tr><td>List registrations</td><td><code>relay registrations list --application app_b</code></td></tr>
+    </table>
+    <p>Every list command accepts <code>--json</code>. To replay everything an application missed:</p>
+<pre><code>relay deliveries list --status exhausted --application app_b --json | jq -r '.[].id' | xargs relay deliveries retry</code></pre>
+    <p><strong>When an event is <code>unresolved</code>,</strong> run <code>relay events inspect</code> to see its
+      reference, metadata and the reason. Then do one of these:</p>
+    <ul>
+      <li>add or fix a route, restart, and run <code>relay events reprocess</code>;</li>
+      <li>have the application register the identifier, which routes the event automatically;</li>
+      <li>assign the owner with <code>relay events reroute</code>.</li>
+    </ul>
+    <p><strong>When an event is <code>ambiguous</code>,</strong> two sources of evidence disagree. Fix the
+      configuration so it can't happen again, then decide the owner with <code>relay events reroute</code>. Relay
+      never changes the owner of an event that is already <code>matched</code>.</p>
+
+    <!-- ───────────────────────────── Switching -->
+    <h2 id="switching">Switching Paystack or Flutterwave to Relay</h2>
+    <p>Changing the webhook URL moves <strong>every</strong> webhook for the account at once. Go step by step:</p>
+    <ol>
+      <li><strong>Take inventory.</strong> List every system that handles the provider's webhooks today, and the
+        event types each one relies on.</li>
+      <li><strong>Configure ownership.</strong> Give every application that takes payments a reference prefix, a
+        metadata marker or registrations. Applications using dedicated virtual accounts must register their accounts.</li>
+      <li><strong>Update receivers.</strong> Each application verifies Relay's signature and deduplicates on
+        <code>X-Relay-Event-ID</code>.</li>
+      <li><strong>Rehearse in test mode.</strong> Point your provider's <strong>test</strong> webhook URL at Relay.
+        Make real test payments through each application, and confirm nothing shows up as <code>unresolved</code> or
+        <code>ambiguous</code>.</li>
+      <li><strong>Plan for other event types.</strong> Refunds, transfers, disputes and subscriptions aren't
+        forwarded yet. Make sure nothing depends on them, or keep handling them another way.</li>
+      <li><strong>Switch the live URL,</strong> then watch the unrouted and exhausted metrics closely for the first day.</li>
+    </ol>
+    <p>The same steps apply to Flutterwave, using its <strong>test mode</strong> webhook settings for step 4.</p>
+
+    <!-- ───────────────────────────── Flutterwave -->
+    <h2 id="flutterwave">Flutterwave</h2>
+    <p>Relay handles Flutterwave webhooks the same way it handles Paystack's: verify, find the owner, store,
+      deliver. Enable it alongside Paystack, or on its own:</p>
+<pre><code>providers:
+  flutterwave:
+    secret_hash_env: FLUTTERWAVE_SECRET_HASH
+
+routes:
+  - application: app_a
+    match:
+      reference_prefix: "APPA_"      # matches tx_ref; applies to both providers
+  - provider: flutterwave
+    application: app_b
+    match:
+      metadata:
+        app: "app_b"                 # a key you set in the payment's meta</code></pre>
+    <ol>
+      <li>In the Flutterwave dashboard, go to <strong>Settings → Webhooks</strong>. Set the URL to your Relay address
+        followed by <code>/webhooks/flutterwave</code>, for example
+        <code>https://relay.yourdomain.com/webhooks/flutterwave</code>.</li>
+      <li>Set a <strong>secret hash</strong> there. Use a long random value (<code>openssl rand -hex 32</code>) and put
+        the same value in <code>FLUTTERWAVE_SECRET_HASH</code>.</li>
+      <li>Turn on <strong>webhook retries</strong>.</li>
+      <li>Start each payment with a <code>tx_ref</code> that carries the application's prefix, or add a marker to its
+        <code>meta</code>. Applications can also register a <code>tx_ref</code> with
+        <code>{"provider":"flutterwave","type":"transaction_reference","value":"..."}</code>.</li>
+    </ol>
+    <table>
+      <tr><th></th><th>Flutterwave</th></tr>
+      <tr><td><strong>Signature</strong></td><td><code>flutterwave-signature</code> (base64 HMAC-SHA256 of the body) or <code>verif-hash</code> (the secret hash itself). Either one is accepted when it's valid.</td></tr>
+      <tr><td><strong>Routed events</strong></td><td><code>charge.completed</code>. Other events, such as <code>transfer.completed</code>, are stored as <code>unsupported</code> until their shape is checked against real payloads.</td></tr>
+      <tr><td><strong>Reference</strong></td><td><code>data.tx_ref</code>, or <code>data.reference</code> for transfers</td></tr>
+      <tr><td><strong>Metadata</strong></td><td><code>data.meta</code>, plus the top-level <code>meta_data</code>. Where both set a key, <code>data.meta</code> wins.</td></tr>
+      <tr><td><strong>Duplicates</strong></td><td><code>&lt;event&gt;:&lt;data.id&gt;:&lt;data.status&gt;</code>, as Flutterwave recommends. A failed charge followed by a successful one with the same ID counts as two events. Anything without an ID and status falls back to a SHA-256 of the body.</td></tr>
+      <tr><td><strong>Dedicated accounts</strong></td><td>Not supported. Route virtual-account payments by <code>tx_ref</code> registration or metadata instead.</td></tr>
+      <tr><td><strong>Provider retries</strong></td><td>Only 3, 30 minutes apart. Keep Relay's downtime short, and keep re-querying pending transactions as Flutterwave advises.</td></tr>
+    </table>
+    <p><strong>Tagging a Flutterwave payment</strong> with a reference prefix and a metadata marker:</p>
+<pre><code>curl https://api.flutterwave.com/v3/payments \
+  -H "Authorization: Bearer $FLW_SECRET_KEY" -H "Content-Type: application/json" \
+  -d '{"tx_ref":"APPA_INV_10293","amount":"5000","currency":"NGN","redirect_url":"https://app-a.yourdomain.com/paid","customer":{"email":"buyer@example.com"},"meta":{"app":"app_a"}}'</code></pre>
+    <p><strong>Trying it locally:</strong> sign a sample Flutterwave event and send it to a running Relay.</p>
+<pre><code>FLUTTERWAVE_SECRET_HASH=your_hash examples/send-fixture.sh flutterwave testdata/flutterwave/charge_completed_card.json</code></pre>
+    <p><code>testdata/flutterwave/MATRIX.md</code> lists the samples and what each one exercises.</p>
+    <p>Deliveries carry <code>X-Relay-Provider: flutterwave</code>, and envelopes carry
+      <code>"provider":"flutterwave"</code>. As with Paystack, check a transaction with Flutterwave's Verify
+      Transaction API before giving value.</p>
+
+    <!-- ───────────────────────────── Go library -->
+    <h2 id="go-library">Use Relay as a Go library</h2>
+    <p><code>relay serve</code> is a thin wrapper around a Go package, so you can import Relay into your own program:</p>
+<pre><code>cfg, err := config.LoadFile("relay.yaml")              // or build a config.Config in Go
+if err != nil { log.Fatal(err) }
+r, err := relay.New(ctx, cfg, relay.WithLogger(slog.Default()))
+if err != nil { log.Fatal(err) }
+defer r.Close()
+
+mux.Handle("/webhooks/", r.WebhookHandler())           // in your existing server
+go r.Run(ctx)                                          // delivery and retention workers
+
+// Claim a reference in-process when you create an order:
+_, routed, err := r.RegisterReference(ctx, "billing", "paystack", "ORDER_1001")</code></pre>
+    <table>
+      <tr><th>Package</th><th>Use it to</th></tr>
+      <tr><td><code>relay</code></td><td>Embed Relay: <code>New</code>, <code>Handler</code>/<code>WebhookHandler</code>/<code>APIHandler</code>, <code>Run</code>/<code>ListenAndServe</code>, <code>RegisterReference</code></td></tr>
+      <tr><td><code>relay/config</code></td><td>Load <code>relay.yaml</code>, or build and <code>Validate</code> a configuration in Go</td></tr>
+      <tr><td><code>relay/receiver</code></td><td>Verify Relay's deliveries in a Go application (<code>receiver.Handler</code>)</td></tr>
+      <tr><td><code>relay/provider</code></td><td>The <code>Adapter</code> interface. Implement it and pass <code>relay.WithProvider</code> to add a payment provider.</td></tr>
+      <tr><td><code>relay/provider/paystack</code>, <code>relay/provider/flutterwave</code></td><td>The built-in adapters, also usable on their own</td></tr>
+    </table>
+    <p>The full guide is in <a href="https://github.com/khaleelhabeeb/relay/blob/main/docs/library.md">docs/library.md</a>:
+      embedding, configuration in Go, receiving deliveries, and writing a provider adapter. The API reference, with
+      runnable examples, is on <a href="https://pkg.go.dev/github.com/khaleelhabeeb/relay">pkg.go.dev</a>. To add a
+      provider, implement <a href="https://pkg.go.dev/github.com/khaleelhabeeb/relay/provider#Adapter"><code>provider.Adapter</code></a>:
+      verify the exact raw body in constant time, keep parsing free of secrets, return a stable dedup key, and route
+      only event types you have checked against real payloads.</p>
+    <p>The API is pre-1.0 and may change between minor versions;
+      <a href="https://github.com/khaleelhabeeb/relay/blob/main/CHANGELOG.md">CHANGELOG.md</a> records every change.</p>
+
+    <!-- ───────────────────────────── Performance -->
+    <h2 id="performance">Performance and reliability</h2>
+    <p>Measured on an Apple M1 laptop with durable commits, sending 3,000 unique signed webhooks:</p>
+    <table>
+      <tr><th>Concurrent senders</th><th>Webhooks accepted per second</th><th>Time to acknowledge (median / 99th percentile)</th><th>End-to-end delivered per second</th></tr>
+      <tr><td>16</td><td>~2,480</td><td>4 ms / 31 ms</td><td>~1,820</td></tr>
+      <tr><td>64</td><td>~3,430</td><td>13 ms / 80 ms</td><td>~1,545</td></tr>
+    </table>
+    <p>That's far above real payment-provider volumes: a million successful charges a month is about 0.4 webhooks per
+      second. On Linux, commit speed depends on your disk; network-attached cloud volumes can be several times
+      slower. Run <code>make bench</code> on your own hardware.</p>
+    <ul>
+      <li><strong>Crash testing:</strong> <code>make chaos</code> kills a real Relay process with SIGKILL six times,
+        during ingest and during delivery, while provider-like senders retry and a flaky receiver fails 10% of
+        requests. Across repeated runs, no acknowledged event was lost, every event was delivered, and every
+        signature verified.</li>
+      <li><strong>Fuzzing:</strong> <code>make fuzz</code> covers signature verification, webhook parsing, envelope
+        construction and config loading. About 14.6 million executions ran with no failures.</li>
+    </ul>
+
+    <!-- ───────────────────────────── FAQ -->
+    <h2 id="faq">FAQ</h2>
+    <h3>Does a delivery from Relay prove the customer paid?</h3>
+    <p>It proves the event came from Relay, which verified that it came from Paystack or Flutterwave. Before giving
+      value, check the amount, currency and status with the provider's Verify Transaction API, as you would without
+      Relay.</p>
+    <h3>Can my application receive the same event twice?</h3>
+    <p>Yes. Delivery is at least once, so always deduplicate on <code>X-Relay-Event-ID</code>. Retries and replays
+      keep the same ID.</p>
+    <h3>What happens if Relay is down?</h3>
+    <p>The provider gets no <code>200</code>, so it retries.</p>
+    <ul>
+      <li><strong>Paystack</strong> retries every 3 minutes for the first 4 tries, then hourly for 72 hours in live mode.</li>
+      <li><strong>Flutterwave</strong> retries only 3 times, 30 minutes apart, and only if retries are enabled in its dashboard.</li>
+    </ul>
+    <p>Keep downtime short, especially with Flutterwave. Relay ignores anything that arrives twice.</p>
+    <h3>What happens if my application is down?</h3>
+    <p>Relay keeps retrying for about 24 hours by default, then marks the delivery <code>exhausted</code> for you to
+      replay. Tune <code>delivery.max_attempts</code> and <code>delivery.retry_schedule</code> to change that.</p>
+    <h3>Can I run several Relay instances for high availability?</h3>
+    <p>Not on one database in this version. Relay is a single process with a lock file. The providers' own retries
+      cover restarts and short outages.</p>
+    <h3>Why aren't refunds, transfers or subscriptions forwarded?</h3>
+    <p>Their payloads identify the owner differently, and Relay only routes event shapes that have been checked
+      against real provider payloads. They're stored, so nothing is lost, and support is planned.</p>
+    <h3>How are duplicate webhooks detected?</h3>
+    <ul>
+      <li><strong>Paystack <code>charge.success</code>:</strong> by the transaction ID, so a resent event is
+        recognised even if its bytes differ.</li>
+      <li><strong>Flutterwave:</strong> by <code>event:data.id:data.status</code>, as Flutterwave recommends.</li>
+      <li><strong>Anything else:</strong> by a SHA-256 hash of the exact body.</li>
+    </ul>
+
+    <!-- ───────────────────────────── Development -->
+    <h2 id="development">Development</h2>
+    <p>You need Go 1.26 or later.</p>
+<pre><code>make build    # bin/relay
+make test     # unit and integration tests
+make race     # tests with the race detector
+make fuzz     # fuzz the parsers that handle untrusted input
+make chaos    # kill a real relay process mid-flight and check nothing is lost
+make bench    # throughput and latency on this machine</code></pre>
+    <table>
+      <tr><th>Directory</th><th>Contents</th></tr>
+      <tr><td><code>.</code> (package <code>relay</code>)</td><td>The embeddable library; <code>relay serve</code> runs it</td></tr>
+      <tr><td><code>config</code></td><td>Configuration loading and validation (public)</td></tr>
+      <tr><td><code>provider</code></td><td>Provider-neutral event model and the <code>Adapter</code> interface (public)</td></tr>
+      <tr><td><code>provider/paystack</code>, <code>provider/flutterwave</code></td><td>Built-in provider adapters (public)</td></tr>
+      <tr><td><code>receiver</code></td><td>Verifying Relay's deliveries in Go (public)</td></tr>
+      <tr><td><code>cmd/relay</code></td><td>Entry point</td></tr>
+      <tr><td><code>internal/routing</code></td><td>Ownership decisions (pure, no I/O)</td></tr>
+      <tr><td><code>internal/ingest</code></td><td>The webhook endpoint</td></tr>
+      <tr><td><code>internal/store</code></td><td>SQLite storage and migrations</td></tr>
+      <tr><td><code>internal/delivery</code></td><td>Workers, retries, outbound signing, SSRF protection</td></tr>
+      <tr><td><code>internal/registration</code></td><td>The <code>/v1/registrations</code> API</td></tr>
+      <tr><td><code>internal/cli</code></td><td>The <code>relay</code> command</td></tr>
+      <tr><td><code>examples</code></td><td>Sample config, docker-compose demo, demo receiver</td></tr>
+      <tr><td><code>test/chaos</code></td><td>Crash and load tests against the real binary</td></tr>
+    </table>
+    <p>Issues and pull requests are welcome. Please run <code>make test</code> and <code>go vet ./...</code> before
+      opening a pull request. Release history is in
+      <a href="https://github.com/khaleelhabeeb/relay/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</p>
+  </main>
+</div>
+
+<footer>
+  <div class="inner">
+    <span>Relay is released under the <a href="https://github.com/khaleelhabeeb/relay/blob/main/LICENSE">MIT License</a>.</span>
+    <span><a href="index.html">Home</a> · <a href="https://github.com/khaleelhabeeb/relay">GitHub</a> · <a href="https://pkg.go.dev/github.com/khaleelhabeeb/relay">pkg.go.dev</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

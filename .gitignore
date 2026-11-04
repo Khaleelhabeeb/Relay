@@ -11,5 +11,10 @@ coverage.out
 
 docs/*
 !docs/library.md
+!docs/index.html
+!docs/docs.html
+!docs/style.css
+!docs/.nojekyll
+!docs/assets/
 system-design.md
 .claude

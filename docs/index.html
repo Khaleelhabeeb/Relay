@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relay — route Paystack and Flutterwave webhooks to many apps</title>
+  <meta name="description" content="Relay is a small self-hosted Go service that receives Paystack and Flutterwave webhooks, works out which application owns each event, and delivers it there with its own signature.">
+  <meta property="og:title" content="Relay">
+  <meta property="og:description" content="One Paystack or Flutterwave account. Many applications. Every webhook delivered to the right one.">
+  <meta property="og:image" content="assets/social-preview.png">
+  <link rel="icon" href="assets/relay-logo.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="inner">
+    <a class="logo" href="index.html" aria-label="Relay home">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/relay-logo-dark.png">
+        <img src="assets/relay-logo.png" alt="Relay">
+      </picture>
+    </a>
+    <nav>
+      <a href="docs.html">Docs</a>
+      <a href="docs.html#try-it-in-five-minutes">Quick start</a>
+      <a href="https://github.com/khaleelhabeeb/relay">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/relay-logo-dark.png">
+      <img class="hero-logo" src="assets/relay-logo.png" alt="Relay">
+    </picture>
+    <h1>One Paystack or Flutterwave account. Many applications. Every webhook delivered to the right one.</h1>
+    <p>Relay is a small self-hosted Go service. It receives your payment provider's webhooks, verifies them,
+      decides which application owns each event, stores it safely, and delivers it to that application with
+      its own signature.</p>
+    <div class="buttons">
+      <a class="btn btn-primary" href="docs.html">Read the docs</a>
+      <a class="btn btn-secondary" href="docs.html#try-it-in-five-minutes">Try it in five minutes</a>
+      <a class="btn btn-secondary" href="https://github.com/khaleelhabeeb/relay">View on GitHub</a>
+    </div>
+    <div class="install-line">
+      <pre><code>go install github.com/khaleelhabeeb/relay/cmd/relay@latest</code></pre>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="section">
+      <h2>The problem</h2>
+      <p class="lead">Paystack and Flutterwave each send all webhooks for an account to <strong>one URL</strong>.
+        If App A, App B and App C share that account, something at that URL has to work out which application
+        each payment belongs to and pass the event on. Relay is that piece. It never guesses and never
+        broadcasts payment data.</p>
+      <div class="grid">
+        <div class="card">
+          <h3>One binary, no infrastructure</h3>
+          <p>Embedded SQLite. No Redis, no message queue, no dashboard to host.</p>
+        </div>
+        <div class="card">
+          <h3>Safe by default</h3>
+          <p>Signatures are verified on the exact bytes the provider sent. Relay answers only after the event
+            is committed to disk.</p>
+        </div>
+        <div class="card">
+          <h3>Language-agnostic</h3>
+          <p>Your apps receive a plain signed HTTP POST. No SDK needed: verification code for Python, PHP,
+            Node.js and Go.</p>
+        </div>
+        <div class="card">
+          <h3>Paystack and Flutterwave</h3>
+          <p>Enable either, or both side by side, on <code>/webhooks/paystack</code> and
+            <code>/webhooks/flutterwave</code>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>How it works</h2>
+    <p class="lead">From the provider's webhook to a signed delivery your application can trust.</p>
+<pre><code>                            ┌──────────────────────── Relay ─────────────────────────┐
+ Paystack    ── webhook ──▶ │ verify signature ─▶ find owner ─▶ save to SQLite ─▶ 200 │
+ Flutterwave ── webhook ──▶ │                                          │             │
+                            │                         delivery workers ◀┘             │
+                            └──────────────┬──────────────────┬────────────────────────┘
+                                           ▼                  ▼
+                                         App A              App B         (signed POSTs,
+                                                                          retried on failure)</code></pre>
+    <ol class="steps">
+      <li><strong>Receive.</strong> The provider posts a webhook to Relay.</li>
+      <li><strong>Verify.</strong> Relay checks the signature against the raw request body and rejects forgeries.</li>
+      <li><strong>Find the owner.</strong> By reference prefix, metadata, or references and virtual accounts your apps registered.</li>
+      <li><strong>Store.</strong> The event and the decision are saved in one transaction, and only then does Relay answer <code>200</code>.</li>
+      <li><strong>Deliver.</strong> A worker sends the event to the owning app and retries with backoff for up to 24 hours.</li>
+    </ol>
+    <div class="note">No owner, or more than one? Relay holds the event as <code>unresolved</code> or
+      <code>ambiguous</code> for you to resolve from the CLI.</div>
+  </section>
+
+  <section class="band">
+    <div class="section">
+      <h2>Receive events in a few lines</h2>
+      <p class="lead">Verify Relay's signature, deduplicate on <code>X-Relay-Event-ID</code>, respond quickly.</p>
+<pre><code>http.Handle("/webhooks/relay", receiver.Handler(secret, func(ctx context.Context, d *receiver.Delivery) error {
+	// deduplicate on d.EventID, then process d.Body; an error makes Relay retry
+	return nil
+}))</code></pre>
+      <p><a href="docs.html#verifying-the-signature">See Python, PHP and Node.js examples →</a></p>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Built to not lose payments</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>~3,400 webhooks/s</h3>
+        <p>Accepted on an Apple M1 laptop with durable commits. A million charges a month is about 0.4 per second.</p>
+      </div>
+      <div class="card">
+        <h3>Crash tested</h3>
+        <p>SIGKILLed mid-ingest and mid-delivery: no acknowledged event lost, every signature verified.</p>
+      </div>
+      <div class="card">
+        <h3>Fuzzed</h3>
+        <p>About 14.6 million executions across signature verification, parsing and config loading.</p>
+      </div>
+    </div>
+    <div class="buttons">
+      <a class="btn btn-primary" href="docs.html">Get started</a>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="inner">
+    <span>Relay is MIT licensed. It does not process payments or hold money.</span>
+    <span><a href="docs.html">Docs</a> · <a href="https://github.com/khaleelhabeeb/relay">GitHub</a> · <a href="https://pkg.go.dev/github.com/khaleelhabeeb/relay">pkg.go.dev</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
