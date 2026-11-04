@@ -32,7 +32,7 @@ func Parse(raw []byte) (*Event, error) {
 		Data  json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrMalformedEvent, err)
+		return nil, fmt.Errorf("%w: %w", ErrMalformedEvent, err)
 	}
 	if strings.TrimSpace(env.Event) == "" {
 		return nil, fmt.Errorf("%w: missing event type", ErrMalformedEvent)

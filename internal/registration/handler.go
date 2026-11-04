@@ -211,7 +211,7 @@ var ErrInvalid = errors.New("registration: invalid request")
 func (h *Handler) Register(ctx context.Context, app string, req CreateRequest) (reg *store.Registration, created bool, routed int, err error) {
 	value, err := normalize(req, h.providers)
 	if err != nil {
-		return nil, false, 0, fmt.Errorf("%w: %v", ErrInvalid, err)
+		return nil, false, 0, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	log := h.logger.With("application", app, "provider", req.Provider, "type", req.Type)
 	reg, created, err = h.store.CreateRegistration(ctx, req.Provider, req.Type, value, app, h.now())

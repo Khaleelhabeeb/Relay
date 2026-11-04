@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -364,7 +365,7 @@ func TestExpiredLeaseIsReclaimed(t *testing.T) {
 	// The old owner can no longer record a result.
 	err = h.store.CompleteAttempt(context.Background(), store.AttemptResult{
 		DeliveryID: d.ID, AttemptID: "att_x", Owner: "wrk_a", FinishedAt: now, Status: store.DeliveryDelivered})
-	if err != store.ErrLeaseLost {
+	if !errors.Is(err, store.ErrLeaseLost) {
 		t.Fatalf("stale owner complete = %v, want ErrLeaseLost", err)
 	}
 }

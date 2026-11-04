@@ -120,7 +120,12 @@ func TestAuthentication(t *testing.T) {
 	}
 	req, _ := http.NewRequest("GET", e.srv.URL+"/v1/registrations", nil)
 	req.Header.Set("Authorization", "Basic "+tokenA)
-	if resp, _ := http.DefaultClient.Do(req); resp.StatusCode != 401 {
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
 		t.Error("non-bearer scheme must be rejected")
 	}
 	if r := e.do("GET", "/v1/registrations", tokenA, ""); r.status != 200 {

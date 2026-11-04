@@ -250,7 +250,11 @@ func TestGracefulShutdown(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("shutdown hung")
 	}
-	if _, err := http.Get(url); err == nil || !strings.Contains(err.Error(), "refused") {
+	resp, err := http.Get(url)
+	if err == nil {
+		resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "refused") {
 		t.Fatalf("expected connection refused after shutdown, got %v", err)
 	}
 }

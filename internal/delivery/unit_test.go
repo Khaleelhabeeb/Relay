@@ -143,7 +143,10 @@ func TestClientBlocksPrivateDestinations(t *testing.T) {
 	// refused at connect time, after resolution.
 	for _, target := range []string{ts.URL, "http://localhost" + port} {
 		req, _ := http.NewRequest(http.MethodPost, target, nil)
-		_, err := client.Do(req)
+		resp, err := client.Do(req)
+		if resp != nil {
+			resp.Body.Close()
+		}
 		if !errors.Is(err, ErrBlockedDestination) {
 			t.Errorf("%s: got %v, want ErrBlockedDestination", target, err)
 		}

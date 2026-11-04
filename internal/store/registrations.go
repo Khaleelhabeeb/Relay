@@ -151,7 +151,7 @@ func (s *Store) ListRegistrations(ctx context.Context, f RegistrationFilter) ([]
 	}
 	q := `SELECT ` + registrationColumns + ` FROM registrations`
 	if len(where) > 0 {
-		q += " WHERE " + strings.Join(where, " AND ")
+		q += " WHERE " + strings.Join(where, " AND ") //nolint:gosec // where holds only constant "col = ?" fragments
 	}
 	limit := f.Limit
 	if limit <= 0 {

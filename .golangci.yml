@@ -6,6 +6,22 @@ linters:
     - errorlint
     - gosec
     - misspell
+  settings:
+    gosec:
+      excludes:
+        # Unhandled errors duplicate errcheck, which already applies the
+        # std-error-handling exclusions below.
+        - G104
+  exclusions:
+    presets:
+      # Unchecked Close, Flush and fmt.Fprint* errors.
+      - std-error-handling
+    rules:
+      # Fixture secrets, fixture file reads and test servers are not
+      # security issues.
+      - path: _test\.go
+        linters:
+          - gosec
 formatters:
   enable:
     - gofmt

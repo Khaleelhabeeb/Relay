@@ -47,7 +47,7 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]EventSummary, 
 	q := `SELECT id, event_type, routing_status, application_id, reference, received_at, duplicate_count,
 		COALESCE(LENGTH(raw_payload), 0) FROM events`
 	if len(where) > 0 {
-		q += " WHERE " + strings.Join(where, " AND ")
+		q += " WHERE " + strings.Join(where, " AND ") //nolint:gosec // where holds only constant "col = ?" fragments
 	}
 	q += " ORDER BY received_at DESC, id DESC LIMIT ?"
 	args = append(args, limitOr(f.Limit, 50))
@@ -101,7 +101,7 @@ func (s *Store) ListDeliveries(ctx context.Context, f DeliveryFilter) ([]Deliver
 	q := `SELECT id, event_id, application_id, status, attempt_count, next_attempt_at, created_at, updated_at,
 		last_error FROM deliveries`
 	if len(where) > 0 {
-		q += " WHERE " + strings.Join(where, " AND ")
+		q += " WHERE " + strings.Join(where, " AND ") //nolint:gosec // where holds only constant "col = ?" fragments
 	}
 	q += " ORDER BY updated_at DESC, id DESC LIMIT ?"
 	args = append(args, limitOr(f.Limit, 50))
