@@ -21,7 +21,7 @@ First release: a self-hosted Paystack webhook router.
   - Package `relay/receiver` verifies Relay's deliveries in Go (`Handler`, `Verify`, `Envelope`).
   - Package `relay/provider`: the `Adapter` interface. Add providers with `relay.WithProvider`.
     Adapters now declare their routed event types with `Routes`. Built-in adapters live in
-    `relay/provider/paystack` and `relay/provider/flutterwave`.
+    `relay/provider/paystack`, `relay/provider/flutterwave` and `relay/provider/monnify`.
   - `relay config validate --provider <name>` accepts routes to providers added in code.
 - **Flutterwave provider.**
   - `POST /webhooks/flutterwave` accepts `flutterwave-signature` (HMAC-SHA256) or `verif-hash`.
@@ -29,6 +29,19 @@ First release: a self-hosted Paystack webhook router.
   - Deduplicates on `event:data.id:status`.
   - Configured under `providers.flutterwave`. Both providers are now optional, but at least one is
     required.
+- **Monnify provider.**
+  - `POST /webhooks/monnify` verifies `monnify-signature` (hex HMAC-SHA512 keyed with the client
+    secret key).
+  - Routes `SUCCESSFUL_TRANSACTION` by `paymentReference` prefix, `metaData`, or a registered
+    reference. Reserved-account deposits route by their `accountReference` (`product.reference`)
+    or by a `dedicated_account` registration of the receiving account, which the registration
+    API now accepts for Monnify.
+  - Deduplicates on `eventType:transactionReference:paymentStatus`.
+  - Configured under `providers.monnify`. `confirm_with_api` (with `api_key_env`) checks each routed
+    event with Monnify's transaction query API, caching the login token.
+  - `allow_unsigned_sandbox` accepts Monnify's unsigned sandbox webhooks, but only for routed types
+    that the sandbox API confirms. It requires `confirm_with_api` and
+    `api_base_url: https://sandbox.monnify.com`.
 - **Provider-scoped routes.** The optional `routes[].provider` field limits a route to one provider.
 - **`X-Relay-Provider` delivery header.** The envelope's `provider` names the event's real source.
 - The `relay_webhooks_received_total` metric gains a `provider` label.

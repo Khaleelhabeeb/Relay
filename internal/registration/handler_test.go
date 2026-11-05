@@ -67,6 +67,7 @@ func newEnv(t *testing.T) *env {
 	}}
 	cfg.Providers.Paystack = &config.PaystackConfig{}
 	cfg.Providers.Flutterwave = &config.FlutterwaveConfig{}
+	cfg.Providers.Monnify = &config.MonnifyConfig{}
 	rp := &reprocess.Reprocessor{Store: st, Engine: engine, Logger: logger, Now: clk.Now}
 	h := NewHandler(cfg, st, rp, logger)
 	h.now = clk.Now
@@ -167,6 +168,20 @@ func TestReferenceLifecycle(t *testing.T) {
 	// ...but the original owner may claim it again.
 	if r := e.do("POST", "/v1/registrations", tokenA, refBody("APPA_01JABC")); r.status != 201 || r.body["id"] == id {
 		t.Fatalf("owner re-claim: %d %v", r.status, r.body)
+	}
+}
+
+// Monnify reserved accounts are dedicated accounts too, registered per
+// provider: the same account under paystack is a different claim.
+func TestMonnifyReservedAccount(t *testing.T) {
+	e := newEnv(t)
+	body := `{"provider":"monnify","type":"dedicated_account","bank":"Sterling bank","account_number":"6000140770"}`
+	r := e.do("POST", "/v1/registrations", tokenA, body)
+	if r.status != 201 || r.body["value"] != "sterling bank:6000140770" || r.body["provider"] != "monnify" {
+		t.Fatalf("create: %d %v", r.status, r.body)
+	}
+	if r := e.do("POST", "/v1/registrations", tokenB, dvaBody("Sterling bank", "6000140770")); r.status != 201 {
+		t.Fatalf("same account under paystack: %d %v", r.status, r.body)
 	}
 }
 

@@ -18,6 +18,10 @@ import (
 // registration token, in bytes.
 const MinSecretLen = 32
 
+// MonnifySandboxHost is the only API host providers.monnify may use with
+// allow_unsigned_sandbox.
+const MonnifySandboxHost = "sandbox.monnify.com"
+
 var appIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
 
 func (c *Config) sortedAppIDs() []string {
@@ -58,7 +62,22 @@ func (c *Config) validate(extraProviders []string) []error {
 	}
 	providers := append(c.Providers.Names(), extraProviders...)
 	if len(providers) == 0 {
-		fail("providers: at least one provider (paystack or flutterwave) is required")
+		fail("providers: at least one provider (paystack, flutterwave or monnify) is required")
+	}
+	if m := c.Providers.Monnify; m != nil {
+		if m.APIBaseURL != "" {
+			if u, err := url.Parse(m.APIBaseURL); err != nil || u.Scheme != "https" || u.Host == "" {
+				fail("providers.monnify.api_base_url: must be an absolute https URL")
+			}
+		}
+		if m.AllowUnsignedSandbox {
+			if !m.ConfirmWithAPI {
+				fail("providers.monnify.allow_unsigned_sandbox: requires confirm_with_api, which is what authenticates unsigned webhooks")
+			}
+			if u, err := url.Parse(m.APIBaseURL); err != nil || u.Hostname() != MonnifySandboxHost {
+				fail("providers.monnify.allow_unsigned_sandbox: requires api_base_url https://%s; never enable it against the live API", MonnifySandboxHost)
+			}
+		}
 	}
 	for _, name := range c.Providers.Names() {
 		for _, p := range c.Providers.AllowedIPs(name) {

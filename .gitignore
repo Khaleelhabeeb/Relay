@@ -18,3 +18,4 @@ docs/*
 !docs/assets/
 system-design.md
 .claude
+.ua

@@ -17,6 +17,7 @@ import (
 	"github.com/khaleelhabeeb/relay/internal/metrics"
 	"github.com/khaleelhabeeb/relay/provider"
 	"github.com/khaleelhabeeb/relay/provider/flutterwave"
+	"github.com/khaleelhabeeb/relay/provider/monnify"
 	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
 
@@ -117,6 +118,10 @@ func Adapters(cfg *config.Config) []provider.Adapter {
 	}
 	if p := cfg.Providers.Flutterwave; p != nil {
 		out = append(out, flutterwave.Adapter{SecretHash: p.SecretHash, ConfirmWithAPI: p.ConfirmWithAPI, SecretKey: p.SecretKey})
+	}
+	if p := cfg.Providers.Monnify; p != nil {
+		out = append(out, monnify.Adapter{SecretKey: p.SecretKey, ConfirmWithAPI: p.ConfirmWithAPI, APIKey: p.APIKey,
+			APIBaseURL: p.APIBaseURL, AllowUnsignedSandbox: p.AllowUnsignedSandbox})
 	}
 	return out
 }

@@ -52,6 +52,7 @@ import (
 	"github.com/khaleelhabeeb/relay/internal/store"
 	"github.com/khaleelhabeeb/relay/provider"
 	"github.com/khaleelhabeeb/relay/provider/flutterwave"
+	"github.com/khaleelhabeeb/relay/provider/monnify"
 	"github.com/khaleelhabeeb/relay/provider/paystack"
 )
 
@@ -84,9 +85,9 @@ type options struct {
 func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
 
 // WithProvider adds a provider, served at /webhooks/<a.Name()>. An adapter
-// named like a built-in provider ("paystack", "flutterwave") replaces the
-// one configured in cfg.Providers. Routes may name the provider in
-// routes[].provider.
+// named like a built-in provider ("paystack", "flutterwave", "monnify")
+// replaces the one configured in cfg.Providers. Routes may name the provider
+// in routes[].provider.
 func WithProvider(a provider.Adapter) Option {
 	return func(o *options) { o.adapters = append(o.adapters, a) }
 }
@@ -208,6 +209,10 @@ func missingSecret(a provider.Adapter) bool {
 		return a.SecretHash == "" || (a.ConfirmWithAPI && a.SecretKey == "")
 	case *flutterwave.Adapter:
 		return a.SecretHash == "" || (a.ConfirmWithAPI && a.SecretKey == "")
+	case monnify.Adapter:
+		return a.SecretKey == "" || (a.ConfirmWithAPI && a.APIKey == "")
+	case *monnify.Adapter:
+		return a.SecretKey == "" || (a.ConfirmWithAPI && a.APIKey == "")
 	}
 	return false
 }
@@ -231,6 +236,12 @@ func logWarnings(cfg *config.Config, logger *slog.Logger) {
 		if p := cfg.Providers.Flutterwave; p != nil && !p.ConfirmWithAPI {
 			logger.Warn("providers.flutterwave.confirm_with_api is off: anyone who knows the secret hash can forge webhooks that Relay delivers")
 		}
+		if p := cfg.Providers.Monnify; p != nil && !p.ConfirmWithAPI {
+			logger.Warn("providers.monnify.confirm_with_api is off: any application holding the Monnify secret key can forge webhooks that Relay delivers to the others")
+		}
+	}
+	if p := cfg.Providers.Monnify; p != nil && p.AllowUnsignedSandbox {
+		logger.Warn("providers.monnify.allow_unsigned_sandbox is enabled: unsigned webhooks are accepted when the Monnify sandbox API confirms them; sandbox only")
 	}
 	if cfg.Delivery.AllowInsecureLocal {
 		logger.Warn("delivery.allow_insecure_local is enabled: http:// and private destinations are allowed; development only")

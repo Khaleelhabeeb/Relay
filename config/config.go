@@ -87,6 +87,7 @@ type StorageConfig struct {
 type ProvidersConfig struct {
 	Paystack    *PaystackConfig    `yaml:"paystack"`
 	Flutterwave *FlutterwaveConfig `yaml:"flutterwave"`
+	Monnify     *MonnifyConfig     `yaml:"monnify"`
 }
 
 // Names returns the enabled providers' names, in a fixed order.
@@ -98,6 +99,9 @@ func (p ProvidersConfig) Names() []string {
 	if p.Flutterwave != nil {
 		out = append(out, ProviderFlutterwave)
 	}
+	if p.Monnify != nil {
+		out = append(out, ProviderMonnify)
+	}
 	return out
 }
 
@@ -108,14 +112,18 @@ func (p ProvidersConfig) AllowedIPs(name string) []string {
 		return p.Paystack.AllowedIPs
 	case name == ProviderFlutterwave && p.Flutterwave != nil:
 		return p.Flutterwave.AllowedIPs
+	case name == ProviderMonnify && p.Monnify != nil:
+		return p.Monnify.AllowedIPs
 	}
 	return nil
 }
 
-// Provider names, matching provider.Paystack and provider.Flutterwave.
+// Provider names, matching provider.Paystack, provider.Flutterwave and
+// provider.Monnify.
 const (
 	ProviderPaystack    = "paystack"
 	ProviderFlutterwave = "flutterwave"
+	ProviderMonnify     = "monnify"
 )
 
 type PaystackConfig struct {
@@ -141,6 +149,30 @@ type FlutterwaveConfig struct {
 
 	SecretHash string `yaml:"-"`
 	SecretKey  string `yaml:"-"`
+}
+
+// MonnifyConfig names the client secret key and API key from Developers >
+// API Keys & Contracts in the Monnify dashboard. The secret key verifies
+// webhook signatures (monnify-signature).
+type MonnifyConfig struct {
+	SecretKeyEnv string   `yaml:"secret_key_env"`
+	AllowedIPs   []string `yaml:"allowed_ips"`
+	// ConfirmWithAPI checks each routed event with Monnify's transaction
+	// query API before accepting it, so a webhook forged with the shared
+	// secret key is refused. It needs the API key (APIKeyEnv).
+	ConfirmWithAPI bool   `yaml:"confirm_with_api"`
+	APIKeyEnv      string `yaml:"api_key_env"`
+	// APIBaseURL is the Monnify API used by ConfirmWithAPI. Default
+	// https://api.monnify.com; https://sandbox.monnify.com for sandbox.
+	APIBaseURL string `yaml:"api_base_url"`
+	// AllowUnsignedSandbox accepts webhooks without monnify-signature, which
+	// Monnify's sandbox never sends. Each such webhook is accepted only if
+	// the sandbox API confirms it, so it requires ConfirmWithAPI and an
+	// APIBaseURL on sandbox.monnify.com. Never use it in production.
+	AllowUnsignedSandbox bool `yaml:"allow_unsigned_sandbox"`
+
+	SecretKey string `yaml:"-"`
+	APIKey    string `yaml:"-"`
 }
 
 type ApplicationConfig struct {
@@ -357,6 +389,12 @@ func (c *Config) resolveSecrets(env LookupEnv) []error {
 			p.SecretKey = get("providers.flutterwave.secret_key_env", p.SecretKeyEnv, p.ConfirmWithAPI)
 		}
 	}
+	if p := c.Providers.Monnify; p != nil {
+		p.SecretKey = get("providers.monnify.secret_key_env", p.SecretKeyEnv, true)
+		if p.ConfirmWithAPI || p.APIKeyEnv != "" {
+			p.APIKey = get("providers.monnify.api_key_env", p.APIKeyEnv, p.ConfirmWithAPI)
+		}
+	}
 	for _, id := range c.sortedAppIDs() {
 		app := c.Applications[id]
 		if app == nil {
@@ -381,6 +419,12 @@ func (c *Config) missingSecrets() []error {
 	}
 	if p := c.Providers.Flutterwave; p != nil && p.ConfirmWithAPI && p.SecretKey == "" {
 		errs = append(errs, errors.New("providers.flutterwave: SecretKey is required with ConfirmWithAPI"))
+	}
+	if p := c.Providers.Monnify; p != nil && p.SecretKey == "" {
+		errs = append(errs, errors.New("providers.monnify: SecretKey is required"))
+	}
+	if p := c.Providers.Monnify; p != nil && p.ConfirmWithAPI && p.APIKey == "" {
+		errs = append(errs, errors.New("providers.monnify: APIKey is required with ConfirmWithAPI"))
 	}
 	for _, id := range c.sortedAppIDs() {
 		if app := c.Applications[id]; app != nil && app.SigningSecret == "" {
