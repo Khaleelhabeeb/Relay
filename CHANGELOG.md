@@ -21,7 +21,8 @@ First release: a self-hosted Paystack webhook router.
   - Package `relay/receiver` verifies Relay's deliveries in Go (`Handler`, `Verify`, `Envelope`).
   - Package `relay/provider`: the `Adapter` interface. Add providers with `relay.WithProvider`.
     Adapters now declare their routed event types with `Routes`. Built-in adapters live in
-    `relay/provider/paystack`, `relay/provider/flutterwave` and `relay/provider/monnify`.
+    `relay/provider/paystack`, `relay/provider/flutterwave`, `relay/provider/monnify` and
+    `relay/provider/stripe`.
   - `relay config validate --provider <name>` accepts routes to providers added in code.
 - **Flutterwave provider.**
   - `POST /webhooks/flutterwave` accepts `flutterwave-signature` (HMAC-SHA256) or `verif-hash`.
@@ -42,6 +43,20 @@ First release: a self-hosted Paystack webhook router.
   - `allow_unsigned_sandbox` accepts Monnify's unsigned sandbox webhooks, but only for routed types
     that the sandbox API confirms. It requires `confirm_with_api` and
     `api_base_url: https://sandbox.monnify.com`.
+- **Stripe provider.**
+  - `POST /webhooks/stripe` verifies `Stripe-Signature` (HMAC-SHA256 over `t.body`). It accepts
+    any `v1` under any configured signing secret, so secrets can be rolled, and rejects
+    timestamps outside a 5-minute tolerance.
+  - Routes `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+    `checkout.session.async_payment_failed`, `checkout.session.expired`,
+    `payment_intent.succeeded`, `payment_intent.payment_failed`, `payment_intent.processing` and
+    `payment_intent.canceled`. They route by `client_reference_id` (Checkout) or
+    `metadata.reference` prefix, by `metadata`, or by a registered reference. Other types, and
+    all Connect events, are stored as `unsupported`.
+  - Deduplicates on the event id.
+  - Configured under `providers.stripe`. `livemode` is required and enforced per event.
+    `confirm_with_api` (with `api_key_env`) re-fetches each routed event with
+    `GET /v1/events/:id` and compares it.
 - **Provider-scoped routes.** The optional `routes[].provider` field limits a route to one provider.
 - **`X-Relay-Provider` delivery header.** The envelope's `provider` names the event's real source.
 - The `relay_webhooks_received_total` metric gains a `provider` label.

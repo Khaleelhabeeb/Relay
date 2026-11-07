@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <strong>One Paystack, Flutterwave or Monnify account. Many applications. Every webhook delivered to the right one.</strong>
+  <strong>One Paystack, Flutterwave, Monnify or Stripe account. Many applications. Every webhook delivered to the right one.</strong>
 </p>
 
 <p align="center">
@@ -18,7 +18,8 @@
 
 ---
 
-Paystack, Flutterwave and Monnify each send all webhooks for an account to **one URL**. If several of your
+Paystack, Flutterwave and Monnify each send all webhooks for an account to **one URL**, and
+Stripe sends every subscribed event to every endpoint. If several of your
 applications share that account, such as App A, App B and App C, you need something at that URL
 that works out which application each payment belongs to and passes the event on to it.
 
@@ -37,10 +38,11 @@ event for you to resolve. It never guesses and never broadcasts payment data.
 - **Language-agnostic.** Your applications receive a plain signed HTTP POST, so no SDK is
   needed. Verification code is below for Python, PHP, Node.js and Go.
 
-- **Paystack, Flutterwave and Monnify.** Enable any one, or several side by side in one
+- **Paystack, Flutterwave, Monnify and Stripe.** Enable any one, or several side by side in one
   instance. Each provider has its own endpoint: `/webhooks/paystack`, `/webhooks/flutterwave` or
-  `/webhooks/monnify`. Most examples below use Paystack. The [Flutterwave](#flutterwave) and
-  [Monnify](#monnify) sections cover what's different.
+  `/webhooks/monnify` or `/webhooks/stripe`. Most examples below use Paystack. The
+  [Flutterwave](#flutterwave), [Monnify](#monnify) and [Stripe](#stripe) sections cover what's
+  different.
 
 Relay does **not** process payments, hold money or replace checking a transaction with your
 payment provider.
@@ -59,6 +61,7 @@ payment provider.
 - [Switching your provider to Relay](#switching-your-provider-to-relay)
 - [Flutterwave](#flutterwave)
 - [Monnify](#monnify)
+- [Stripe](#stripe)
 - [Use Relay as a Go library](#use-relay-as-a-go-library)
 - [Performance and reliability](#performance-and-reliability)
 - [FAQ](#faq)
@@ -71,6 +74,7 @@ payment provider.
  Paystack    ── webhook ──▶ │ verify signature ─▶ find owner ─▶ save to SQLite ─▶ 200 │
  Flutterwave ── webhook ──▶ │                                          │             │
  Monnify     ── webhook ──▶ │                                          │             │
+ Stripe      ── webhook ──▶ │                                          │             │
                             │                         delivery workers ◀┘             │
                             └──────────────┬──────────────────┬────────────────────────┘
                                            ▼                  ▼
@@ -80,12 +84,15 @@ payment provider.
 
 1. The provider posts a webhook to Relay. Paystack posts to
    `https://relay.example.com/webhooks/paystack`, Flutterwave to
-   `https://relay.example.com/webhooks/flutterwave`, and Monnify to
-   `https://relay.example.com/webhooks/monnify`.
+   `https://relay.example.com/webhooks/flutterwave`, Monnify to
+   `https://relay.example.com/webhooks/monnify`, and Stripe to
+   `https://relay.example.com/webhooks/stripe`.
 2. Relay checks the signature against the raw request body. For Paystack that's
    `x-paystack-signature`, made with your secret key. For Flutterwave it's
    `flutterwave-signature` or `verif-hash`, made with your secret hash. For Monnify it's
-   `monnify-signature`, made with your client secret key. Forged requests are rejected.
+   `monnify-signature`, made with your client secret key. For Stripe it's `Stripe-Signature`,
+   made with the endpoint's signing secret and timestamped against replays. Forged requests are
+   rejected.
 3. Relay finds the owner. It looks at the transaction's **reference prefix**, its **metadata**,
    and any **references or virtual accounts your applications registered** through Relay's API.
 4. Relay saves the event and the decision in one database transaction, and only then answers
@@ -100,12 +107,14 @@ payment provider.
 | Conflicting owners | `ambiguous` | Held. You decide from the CLI. |
 | An event type Relay doesn't route yet | `unsupported` | Stored for audit, nothing to do |
 
-Relay currently routes successful charges:
+Relay currently routes these payment events:
 - **Paystack:** `charge.success`, both checkout payments and deposits into dedicated virtual
   accounts.
 - **Flutterwave:** `charge.completed`.
 - **Monnify:** `SUCCESSFUL_TRANSACTION`, both checkout payments and deposits into reserved
   accounts.
+- **Stripe:** `checkout.session.*` (completed, async payment succeeded/failed, expired) and
+  `payment_intent.*` (succeeded, payment failed, processing, canceled).
 
 Refunds, transfers, disputes and subscriptions are stored but not forwarded yet; see the
 [FAQ](#faq). Customer IDs and emails are never used to decide ownership, because
@@ -189,6 +198,9 @@ providers:                                    # enable one or more
     secret_hash_env: FLUTTERWAVE_SECRET_HASH  # the secret hash from Flutterwave's webhook settings
   monnify:
     secret_key_env: MONNIFY_SECRET_KEY        # your Monnify client secret key
+  stripe:
+    webhook_secret_envs: [STRIPE_WEBHOOK_SECRET]  # the Relay endpoint's signing secret (whsec_…)
+    livemode: true                            # false for test mode
 
 applications:
   app_a:
@@ -232,7 +244,8 @@ that would both claim the same payment, and so on. Every option is listed in the
 When your application starts a transaction, include something Relay can recognise. Pick one
 approach per application. The examples here use Paystack. For Flutterwave, the reference is
 `tx_ref` and the metadata is `meta`, as shown in [Flutterwave](#flutterwave). For Monnify, they
-are `paymentReference` and `metaData`, as shown in [Monnify](#monnify).
+are `paymentReference` and `metaData`, as shown in [Monnify](#monnify). For Stripe, they are
+`client_reference_id` (or `metadata.reference`) and `metadata`, as shown in [Stripe](#stripe).
 
 **A reference prefix.** Start every reference with the application's prefix:
 
@@ -281,6 +294,7 @@ changes. The `X-Relay-Provider` header says which provider the event came from.
 export PAYSTACK_SECRET_KEY=sk_live_...          # if paystack is enabled
 export FLUTTERWAVE_SECRET_HASH=...              # if flutterwave is enabled
 export MONNIFY_SECRET_KEY=...                   # if monnify is enabled
+export STRIPE_WEBHOOK_SECRET=whsec_...          # if stripe is enabled
 export APP_A_RELAY_SECRET=...
 export APP_B_RELAY_SECRET=...
 export APP_B_RELAY_TOKEN=...
@@ -304,6 +318,10 @@ your Relay address followed by `/webhooks/paystack`. For example, if Relay is se
 **Monnify:** in **Developers → Webhook URLs**, set the Transaction Completion URL to
 `https://relay.yourdomain.com/webhooks/monnify`. See [Monnify](#monnify).
 
+**Stripe:** in **Developers → Webhooks**, add an endpoint at
+`https://relay.yourdomain.com/webhooks/stripe` for the routed events, and put its signing secret in
+`STRIPE_WEBHOOK_SECRET`. See [Stripe](#stripe).
+
 Try it with your **test** keys first. Make a test payment for each application and confirm it
 arrives, and that nothing appears in `relay events list --status unresolved`. Before you switch
 live traffic, read [Switching your provider to Relay](#switching-your-provider-to-relay).
@@ -320,7 +338,7 @@ X-Relay-Event-ID: evt_01JBQ7Z3K9X2R4T6V8W0Y2A4C6     ← stable for this event; 
 X-Relay-Delivery-ID: del_01JBQ7Z3M4ABCDEFGHJKMNPQRS
 X-Relay-Timestamp: 1793570000
 X-Relay-Attempt: 1
-X-Relay-Provider: paystack                     ← or flutterwave, monnify
+X-Relay-Provider: paystack                     ← or flutterwave, monnify, stripe
 X-Relay-Signature: v1=fe8e97a7670f414a34ec2115f47bcda1ff597e880bfe6c5edf3b823ff2b12b7f
 
 {"event":"charge.success","data":{ ... exactly as the provider sent it ... }}
@@ -329,7 +347,7 @@ X-Relay-Signature: v1=fe8e97a7670f414a34ec2115f47bcda1ff597e880bfe6c5edf3b823ff2
 | | |
 |---|---|
 | **Body, `original` format** (default) | The exact bytes the provider sent |
-| **`X-Relay-Provider`** | `paystack`, `flutterwave` or `monnify`. It isn't signed; the body itself identifies the provider. |
+| **`X-Relay-Provider`** | `paystack`, `flutterwave`, `monnify` or `stripe`. It isn't signed; the body itself identifies the provider. |
 | **Body, `envelope` format** | `{"relay_version":1,"id":"evt_…","type":"charge.success","provider":"paystack","application":"app_b","received_at":"2026-11-02T10:15:42.123Z","payload":{ original event, byte for byte }}` |
 | **Success** | Any `2xx` response |
 | **Retried** | Timeouts, connection errors, non-`2xx` responses and redirects (never followed). By default 10 attempts over about 24 hours: immediately, then after 30s, 2m, 10m, 30m, 1h, 2h, 4h, 8h and 8h, each ±20%. |
@@ -512,7 +530,7 @@ the timestamp is fixed in the past.
 - **Verify the payment with your provider** before granting value: check amount, currency, status and
   reference. A valid Relay signature proves the request came from Relay, not that the payment
   happened. Every application sharing a Paystack account holds its secret key, and anyone with
-  that key can send Relay a correctly signed webhook (the same holds for Monnify's secret key). Relay then delivers it like any other.
+  that key can send Relay a correctly signed webhook (the same holds for Monnify's secret key, and for anyone who gets hold of a Stripe endpoint signing secret). Relay then delivers it like any other.
   Setting `confirm_with_api` on the provider makes Relay check each payment with the provider's API
   before accepting it, but your own check is still the one that protects you.
 
@@ -531,7 +549,7 @@ main port.
 | `DELETE /v1/registrations/{id}` | Deactivate one of your registrations |
 
 ```bash
-# A transaction reference, before or after the payment ("provider" is paystack, flutterwave or monnify)
+# A transaction reference, before or after the payment ("provider" is paystack, flutterwave, monnify or stripe)
 curl -X POST http://127.0.0.1:8081/v1/registrations \
   -H "Authorization: Bearer $APP_B_RELAY_TOKEN" \
   -d '{"provider":"paystack","type":"transaction_reference","value":"APPB_ORDER_1001"}'
@@ -615,6 +633,14 @@ providers:                      # at least one provider
     api_key_env: MONNIFY_API_KEY      # required with confirm_with_api: Monnify API key (MK_...)
     api_base_url: ""                  # default https://api.monnify.com; https://sandbox.monnify.com for sandbox
     allow_unsigned_sandbox: false     # sandbox only: accept unsigned webhooks the sandbox API confirms (see Monnify)
+  stripe:
+    webhook_secret_envs: [STRIPE_WEBHOOK_SECRET]  # required: endpoint signing secret(s) (whsec_...); list two while rolling
+    livemode: false                   # required: false accepts only test-mode events, true only live events
+    tolerance: 5m                     # max age of the Stripe-Signature timestamp (1m-15m)
+    allowed_ips: []                   # optional; Stripe publishes its webhook IPs
+    confirm_with_api: false           # fetch each routed event from Stripe's events API before accepting it
+    api_key_env: STRIPE_API_KEY       # required with confirm_with_api: sk_... or restricted rk_... with Events: read
+    api_base_url: ""                  # default https://api.stripe.com
 
 applications:
   app_b:                         # application ID: lowercase letters, digits, _ or -
@@ -629,8 +655,8 @@ routes:                         # static ownership rules
   - application: app_b
     provider: paystack          # optional: only events from this provider; omitted = every provider
     match:
-      reference_prefix: "APPB_" # reference starts with this (case-sensitive): Paystack data.reference, Flutterwave data.tx_ref, Monnify paymentReference (accountReference for reserved accounts)
-      metadata:                 # every key equals its value (Paystack data.metadata; Flutterwave data.meta / meta_data; Monnify metaData)
+      reference_prefix: "APPB_" # reference starts with this (case-sensitive): Paystack data.reference, Flutterwave data.tx_ref, Monnify paymentReference (accountReference for reserved accounts), Stripe client_reference_id or metadata.reference
+      metadata:                 # every key equals its value (Paystack data.metadata; Flutterwave data.meta / meta_data; Monnify metaData; Stripe data.object.metadata)
         app: "app_b"             # both matchers set: both must match
 
 delivery:
@@ -693,7 +719,9 @@ server:
 - **Each provider has its own `allowed_ips`.** Flutterwave says its IP addresses are dynamic, so
   leave `providers.flutterwave.allowed_ips` empty unless Flutterwave gives you a fixed list.
   Monnify publishes one address, `35.242.133.146`, which you can put in
-  `providers.monnify.allowed_ips`.
+  `providers.monnify.allowed_ips`. Stripe publishes its webhook addresses at
+  `https://stripe.com/files/ips/ips_webhooks.txt`. They change from time to time, so keep the
+  list in sync if you use `providers.stripe.allowed_ips`.
 
 </details>
 
@@ -803,7 +831,7 @@ Changing the webhook URL moves **every** webhook for the account at once. Go ste
    day.
 
 The steps are the same for every provider. Use Flutterwave's **test mode** webhook settings or
-Monnify's sandbox for step 4.
+Monnify's sandbox for step 4. For Stripe, use a test-mode endpoint, or `stripe listen`.
 
 ## Flutterwave
 
@@ -940,6 +968,84 @@ MONNIFY_SECRET_KEY=your_key examples/send-fixture.sh monnify testdata/monnify/su
 Deliveries carry `X-Relay-Provider: monnify`, and envelopes carry `"provider":"monnify"`. Check
 a transaction with Monnify's transaction query API before giving value.
 
+## Stripe
+
+Relay handles Stripe webhooks the same way as the others: verify, find the owner, store,
+deliver. Stripe lets you register several endpoints, but each one gets every subscribed event,
+so pointing each application at Stripe directly would broadcast every payment to all of them.
+Register **one** endpoint, at Relay:
+
+```yaml
+providers:
+  stripe:
+    webhook_secret_envs: [STRIPE_WEBHOOK_SECRET]
+    livemode: true                        # this Relay serves live events only
+    confirm_with_api: true                # recommended when several applications share the account
+    api_key_env: STRIPE_API_KEY           # restricted key with Events: read
+
+routes:
+  - application: app_a
+    match:
+      reference_prefix: "APPA_"      # matches client_reference_id or metadata.reference
+  - provider: stripe
+    application: app_b
+    match:
+      metadata:
+        app: "app_b"                 # a key you set in the object's metadata
+```
+
+1. In the Stripe Dashboard, go to **Developers → Webhooks** and add an endpoint at your Relay
+   address followed by `/webhooks/stripe`, for example `https://relay.yourdomain.com/webhooks/stripe`.
+   Subscribe it to the routed events below. Other events are accepted, but only stored.
+2. Put the endpoint's **signing secret** (`whsec_…`) in `STRIPE_WEBHOOK_SECRET`. When you roll
+   it, list the old and new secrets' variables in `webhook_secret_envs` until the old one
+   expires.
+3. Tag each payment with its owner:
+   - **Checkout:** set `client_reference_id`, and also
+     `payment_intent_data.metadata.reference` to the same value, so the PaymentIntent's own
+     events route too.
+   - **PaymentIntents:** set `metadata.reference`, or a marker key such as `metadata.app`.
+   - Applications can also register a reference with
+     `{"provider":"stripe","type":"transaction_reference","value":"..."}`.
+4. For `confirm_with_api`, create a **restricted key** with read access to **Events** only, and
+   put it in `STRIPE_API_KEY`. Relay refuses to start if the key's mode (`rk_test_`/`rk_live_`)
+   doesn't match `livemode`.
+
+| | Stripe |
+|---|---|
+| **Signature** | `Stripe-Signature: t=…,v1=…`: hex HMAC-SHA256 of `"<t>.<body>"`, keyed with the endpoint signing secret. Any `v1` under any configured secret is accepted. A timestamp more than `tolerance` (default 5 minutes) from now is rejected. |
+| **Mode** | `livemode` must match the event's `livemode`. A test-mode event sent to a live Relay, or the reverse, gets `401`. Run a separate Relay instance for test mode. |
+| **Routed events** | `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired`, `payment_intent.succeeded`, `payment_intent.payment_failed`, `payment_intent.processing`, `payment_intent.canceled`. Charges, refunds, disputes, invoices and subscriptions are stored as `unsupported` for now. |
+| **Reference** | `client_reference_id` on a Checkout Session, otherwise `metadata.reference` |
+| **Metadata** | `data.object.metadata` |
+| **Connect** | Events from connected accounts (with a top-level `account`) are stored as `unsupported` with type `connect.<type>`. They are not routed yet. |
+| **Duplicates** | The event id (`evt_…`) |
+| **Confirmation** | With `confirm_with_api`, Relay fetches `GET /v1/events/:id`. The type, `livemode`, and the object's id, reference, metadata, status, amounts and currency must match. |
+| **Provider retries** | Up to 3 days with exponential backoff in live mode. You can also resend from the Dashboard. |
+
+**Trying it locally:** forward test-mode events with the Stripe CLI, and set
+`livemode: false` and the `whsec_…` secret it prints:
+
+```bash
+stripe listen --forward-to localhost:8080/webhooks/stripe
+```
+
+```bash
+stripe trigger checkout.session.completed
+```
+
+Or sign a sample event yourself:
+
+```bash
+STRIPE_WEBHOOK_SECRET=whsec_your_secret examples/send-fixture.sh stripe testdata/stripe/checkout_session_completed.json
+```
+
+`testdata/stripe/MATRIX.md` lists the samples and what each one exercises.
+
+Deliveries carry `X-Relay-Provider: stripe`, and envelopes carry `"provider":"stripe"`. In
+`original` format, the application receives Stripe's exact event body. Retrieve the
+PaymentIntent or Checkout Session from Stripe before giving value.
+
 ## Use Relay as a Go library
 
 `relay serve` is a thin wrapper around a Go package, so you can import Relay into your own
@@ -965,7 +1071,7 @@ _, routed, err := r.RegisterReference(ctx, "billing", "paystack", "ORDER_1001")
 | `relay/config` | Load `relay.yaml`, or build and `Validate` a configuration in Go |
 | `relay/receiver` | Verify Relay's deliveries in a Go application (`receiver.Handler`) |
 | `relay/provider` | The `Adapter` interface. Implement it and pass `relay.WithProvider` to add a payment provider. |
-| `relay/provider/paystack`, `relay/provider/flutterwave`, `relay/provider/monnify` | The built-in adapters, also usable on their own |
+| `relay/provider/paystack`, `relay/provider/flutterwave`, `relay/provider/monnify`, `relay/provider/stripe` | The built-in adapters, also usable on their own |
 
 The full guide is in [docs/library.md](docs/library.md): embedding, configuration in Go,
 receiving deliveries, and writing a provider adapter. The API reference, with runnable examples,
@@ -973,7 +1079,7 @@ is on [pkg.go.dev](https://pkg.go.dev/github.com/khaleelhabeeb/relay). To add a 
 [`provider.Adapter`](https://pkg.go.dev/github.com/khaleelhabeeb/relay/provider#Adapter):
 verify the exact raw body in constant time, keep parsing free of secrets, return a stable dedup
 key, and route only event types you have checked against real payloads. The built-in adapters
-in `provider/paystack`, `provider/flutterwave` and `provider/monnify` are complete examples.
+in `provider/paystack`, `provider/flutterwave`, `provider/monnify` and `provider/stripe` are complete examples.
 
 The API is pre-1.0 and may change between minor versions; [CHANGELOG.md](CHANGELOG.md) records
 every change.
@@ -1015,6 +1121,8 @@ The provider gets no `200`, so it retries.
 - **Flutterwave** retries only 3 times, 30 minutes apart, and only if retries are enabled in its
   dashboard.
 - **Monnify** resends when it gets no `200` or times out, on a schedule it doesn't publish.
+- **Stripe** retries with exponential backoff for up to 3 days in live mode (a few hours in test
+  mode), and lets you resend events from the Dashboard.
 
 Keep downtime short, especially with Flutterwave. Relay ignores anything that arrives twice.
 
@@ -1036,6 +1144,7 @@ planned.
   its bytes differ.
 - **Flutterwave:** by `event:data.id:data.status`, as Flutterwave recommends.
 - **Monnify:** by `eventType:transactionReference:paymentStatus`.
+- **Stripe:** by the event id (`evt_…`), which Stripe keeps across retries.
 - **Anything else:** by a SHA-256 hash of the exact body.
 
 A genuine resend always carries the same reference and virtual account. If a "duplicate" carries
@@ -1061,7 +1170,7 @@ make bench    # throughput and latency on this machine
 | `.` (package `relay`) | The embeddable library; `relay serve` runs it |
 | `config` | Configuration loading and validation (public) |
 | `provider` | Provider-neutral event model and the `Adapter` interface (public) |
-| `provider/paystack`, `provider/flutterwave`, `provider/monnify` | Built-in provider adapters (public) |
+| `provider/paystack`, `provider/flutterwave`, `provider/monnify`, `provider/stripe` | Built-in provider adapters (public) |
 | `receiver` | Verifying Relay's deliveries in Go (public) |
 | `cmd/relay` | Entry point |
 | `internal/routing` | Ownership decisions (pure, no I/O) |

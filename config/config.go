@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"slices"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -88,6 +89,7 @@ type ProvidersConfig struct {
 	Paystack    *PaystackConfig    `yaml:"paystack"`
 	Flutterwave *FlutterwaveConfig `yaml:"flutterwave"`
 	Monnify     *MonnifyConfig     `yaml:"monnify"`
+	Stripe      *StripeConfig      `yaml:"stripe"`
 }
 
 // Names returns the enabled providers' names, in a fixed order.
@@ -102,6 +104,9 @@ func (p ProvidersConfig) Names() []string {
 	if p.Monnify != nil {
 		out = append(out, ProviderMonnify)
 	}
+	if p.Stripe != nil {
+		out = append(out, ProviderStripe)
+	}
 	return out
 }
 
@@ -114,16 +119,19 @@ func (p ProvidersConfig) AllowedIPs(name string) []string {
 		return p.Flutterwave.AllowedIPs
 	case name == ProviderMonnify && p.Monnify != nil:
 		return p.Monnify.AllowedIPs
+	case name == ProviderStripe && p.Stripe != nil:
+		return p.Stripe.AllowedIPs
 	}
 	return nil
 }
 
-// Provider names, matching provider.Paystack, provider.Flutterwave and
-// provider.Monnify.
+// Provider names, matching provider.Paystack, provider.Flutterwave,
+// provider.Monnify and provider.Stripe.
 const (
 	ProviderPaystack    = "paystack"
 	ProviderFlutterwave = "flutterwave"
 	ProviderMonnify     = "monnify"
+	ProviderStripe      = "stripe"
 )
 
 type PaystackConfig struct {
@@ -173,6 +181,33 @@ type MonnifyConfig struct {
 
 	SecretKey string `yaml:"-"`
 	APIKey    string `yaml:"-"`
+}
+
+// StripeConfig names the endpoint signing secrets (whsec_...) shown for the
+// Relay endpoint under Developers > Webhooks in the Stripe Dashboard, or
+// printed by `stripe listen`. They verify Stripe-Signature.
+type StripeConfig struct {
+	// WebhookSecretEnvs name one or more signing secrets; a webhook signed
+	// with any of them is accepted. List two while rolling a secret.
+	WebhookSecretEnvs []string `yaml:"webhook_secret_envs"`
+	// Livemode is the mode this Relay serves (required): true accepts only
+	// live events, false only test-mode events.
+	Livemode   *bool    `yaml:"livemode"`
+	AllowedIPs []string `yaml:"allowed_ips"`
+	// Tolerance bounds the age of a signature's timestamp. Default 5m.
+	Tolerance Duration `yaml:"tolerance"`
+	// ConfirmWithAPI fetches each routed event from Stripe's events API
+	// before accepting it, so a webhook forged with a leaked signing secret
+	// is refused. It needs an API key (APIKeyEnv) that can read Events; a
+	// restricted key (rk_...) is enough.
+	ConfirmWithAPI bool   `yaml:"confirm_with_api"`
+	APIKeyEnv      string `yaml:"api_key_env"`
+	// APIBaseURL is the Stripe API used by ConfirmWithAPI. Default
+	// https://api.stripe.com.
+	APIBaseURL string `yaml:"api_base_url"`
+
+	WebhookSecrets []string `yaml:"-"`
+	APIKey         string   `yaml:"-"`
 }
 
 type ApplicationConfig struct {
@@ -395,6 +430,20 @@ func (c *Config) resolveSecrets(env LookupEnv) []error {
 			p.APIKey = get("providers.monnify.api_key_env", p.APIKeyEnv, p.ConfirmWithAPI)
 		}
 	}
+	if p := c.Providers.Stripe; p != nil {
+		p.WebhookSecrets = nil
+		if len(p.WebhookSecretEnvs) == 0 {
+			errs = append(errs, errors.New("providers.stripe.webhook_secret_envs: required"))
+		}
+		for i, name := range p.WebhookSecretEnvs {
+			if v := get(fmt.Sprintf("providers.stripe.webhook_secret_envs[%d]", i), name, true); v != "" {
+				p.WebhookSecrets = append(p.WebhookSecrets, v)
+			}
+		}
+		if p.ConfirmWithAPI || p.APIKeyEnv != "" {
+			p.APIKey = get("providers.stripe.api_key_env", p.APIKeyEnv, p.ConfirmWithAPI)
+		}
+	}
 	for _, id := range c.sortedAppIDs() {
 		app := c.Applications[id]
 		if app == nil {
@@ -425,6 +474,12 @@ func (c *Config) missingSecrets() []error {
 	}
 	if p := c.Providers.Monnify; p != nil && p.ConfirmWithAPI && p.APIKey == "" {
 		errs = append(errs, errors.New("providers.monnify: APIKey is required with ConfirmWithAPI"))
+	}
+	if p := c.Providers.Stripe; p != nil && !slices.ContainsFunc(p.WebhookSecrets, func(s string) bool { return s != "" }) {
+		errs = append(errs, errors.New("providers.stripe: WebhookSecrets is required"))
+	}
+	if p := c.Providers.Stripe; p != nil && p.ConfirmWithAPI && p.APIKey == "" {
+		errs = append(errs, errors.New("providers.stripe: APIKey is required with ConfirmWithAPI"))
 	}
 	for _, id := range c.sortedAppIDs() {
 		if app := c.Applications[id]; app != nil && app.SigningSecret == "" {

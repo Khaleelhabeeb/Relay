@@ -21,6 +21,11 @@ providers:
     # confirm_with_api: true                   # check each routed event with Monnify's API
     # api_key_env: MONNIFY_API_KEY
     # allowed_ips: ["35.242.133.146"]          # Monnify's published webhook IP
+  stripe:
+    webhook_secret_envs: [STRIPE_WEBHOOK_SECRET]  # Developers > Webhooks > endpoint signing secret (whsec_...)
+    livemode: false                            # false: test-mode events only; true: live events only
+    # confirm_with_api: true                   # fetch each routed event from Stripe's events API
+    # api_key_env: STRIPE_API_KEY              # restricted key (rk_...) with Events: read
 
 applications:
   app_a:

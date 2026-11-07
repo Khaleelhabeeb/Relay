@@ -208,7 +208,8 @@ func TestValidation(t *testing.T) {
 		status     int
 		code       string
 	}{
-		{"bad provider", `{"provider":"stripe","type":"transaction_reference","value":"X"}`, 422, "validation_failed"},
+		{"bad provider", `{"provider":"squadco","type":"transaction_reference","value":"X"}`, 422, "validation_failed"},
+		{"dva on stripe", `{"provider":"stripe","type":"dedicated_account","bank":"b","account_number":"1"}`, 422, "validation_failed"},
 		{"dva on flutterwave", `{"provider":"flutterwave","type":"dedicated_account","bank":"b","account_number":"1"}`, 422, "validation_failed"},
 		{"bad type", `{"provider":"paystack","type":"customer","value":"X"}`, 422, "validation_failed"},
 		{"empty value", refBody(""), 422, "validation_failed"},

@@ -14,6 +14,10 @@ func testEnv(overrides map[string]string) LookupEnv {
 		"FLUTTERWAVE_SECRET_HASH":    "flw_hash_xxx",
 		"MONNIFY_SECRET_KEY":         "sk_test_monnify_xxx",
 		"MONNIFY_API_KEY":            "MK_TEST_xxx",
+		"STRIPE_WEBHOOK_SECRET":      "whsec_xxx",
+		"STRIPE_WEBHOOK_SECRET_OLD":  "whsec_old",
+		"STRIPE_TEST_KEY":            "rk_test_xxx",
+		"STRIPE_LIVE_KEY":            "rk_live_xxx",
 		"APP_A_RELAY_SIGNING_SECRET": strings.Repeat("a", 32),
 		"APP_A_RELAY_API_TOKEN":      strings.Repeat("b", 32),
 		"APP_B_RELAY_SIGNING_SECRET": strings.Repeat("c", 32),
@@ -51,6 +55,13 @@ var withMonnify = strings.Replace(base, "providers: {paystack: {secret_env: PAYS
 // monnify returns withMonnify with the monnify block's fields replaced.
 func monnify(fields string) string {
 	return strings.Replace(withMonnify, "monnify: {secret_key_env: MONNIFY_SECRET_KEY}", "monnify: {secret_key_env: MONNIFY_SECRET_KEY, "+fields+"}", 1)
+}
+
+var withStripe = strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "providers: {stripe: {webhook_secret_envs: [STRIPE_WEBHOOK_SECRET], livemode: false}}", 1)
+
+// stripe returns withStripe with the stripe block's fields replaced.
+func stripe(fields string) string {
+	return strings.Replace(withStripe, "stripe: {webhook_secret_envs: [STRIPE_WEBHOOK_SECRET], livemode: false}", "stripe: {"+fields+"}", 1)
 }
 
 func loadYAML(t *testing.T, yaml string, env LookupEnv) (*Config, error) {
@@ -143,6 +154,15 @@ func TestValidationErrors(t *testing.T) {
 		{"unsigned sandbox without confirm", monnify("allow_unsigned_sandbox: true, api_base_url: 'https://sandbox.monnify.com'"), nil, "requires confirm_with_api"},
 		{"unsigned sandbox against live", monnify("allow_unsigned_sandbox: true, confirm_with_api: true, api_key_env: MONNIFY_API_KEY"), nil, "never enable it against the live API"},
 		{"unsigned sandbox against lookalike", monnify("allow_unsigned_sandbox: true, confirm_with_api: true, api_key_env: MONNIFY_API_KEY, api_base_url: 'https://sandbox.monnify.com.evil.example'"), nil, "never enable it against the live API"},
+		{"stripe without secrets", stripe("livemode: false"), nil, "providers.stripe.webhook_secret_envs: required"},
+		{"stripe unset secret", stripe("webhook_secret_envs: [NOPE], livemode: false"), nil, "NOPE is not set"},
+		{"stripe without livemode", stripe("webhook_secret_envs: [STRIPE_WEBHOOK_SECRET]"), nil, "providers.stripe.livemode: required"},
+		{"stripe confirm without api key", stripe("webhook_secret_envs: [STRIPE_WEBHOOK_SECRET], livemode: false, confirm_with_api: true"), nil, "providers.stripe.api_key_env: required"},
+		{"stripe live key in test mode", stripe("webhook_secret_envs: [STRIPE_WEBHOOK_SECRET], livemode: false, confirm_with_api: true, api_key_env: STRIPE_LIVE_KEY"), nil, "is a live key but livemode is false"},
+		{"stripe test key in live mode", stripe("webhook_secret_envs: [STRIPE_WEBHOOK_SECRET], livemode: true, confirm_with_api: true, api_key_env: STRIPE_TEST_KEY"), nil, "is a test-mode key but livemode is true"},
+		{"stripe tolerance too long", stripe("webhook_secret_envs: [STRIPE_WEBHOOK_SECRET], livemode: false, tolerance: 1h"), nil, "providers.stripe.tolerance"},
+		{"stripe http api url", stripe("webhook_secret_envs: [STRIPE_WEBHOOK_SECRET], livemode: false, api_base_url: 'http://api.stripe.com'"), nil, "providers.stripe.api_base_url"},
+		{"stripe bad allowlist", stripe("webhook_secret_envs: [STRIPE_WEBHOOK_SECRET], livemode: false, allowed_ips: [nope]"), nil, "providers.stripe.allowed_ips"},
 		{"unscoped route overlaps scoped", bothProviders + "routes:\n- {provider: flutterwave, application: app_a, match: {reference_prefix: A}}\n- {application: app_b, match: {reference_prefix: A}}\n", nil, "overlap"},
 	}
 	for _, tc := range cases {
@@ -167,6 +187,9 @@ func TestValidationAccepts(t *testing.T) {
 		"monnify":                                     withMonnify,
 		"monnify confirm with api":                    monnify("confirm_with_api: true, api_key_env: MONNIFY_API_KEY"),
 		"monnify unsigned sandbox":                    monnify("confirm_with_api: true, api_key_env: MONNIFY_API_KEY, allow_unsigned_sandbox: true, api_base_url: 'https://sandbox.monnify.com'"),
+		"stripe":                                      withStripe,
+		"stripe two secrets, live, confirm":           stripe("webhook_secret_envs: [STRIPE_WEBHOOK_SECRET, STRIPE_WEBHOOK_SECRET_OLD], livemode: true, confirm_with_api: true, api_key_env: STRIPE_LIVE_KEY, tolerance: 10m"),
+		"stripe test confirm":                         stripe("webhook_secret_envs: [STRIPE_WEBHOOK_SECRET], livemode: false, confirm_with_api: true, api_key_env: STRIPE_TEST_KEY"),
 		"insecure local opt-in":                       strings.Replace(base, "https://uni.example.com", "http://127.0.0.1:9000", 1) + "delivery: {allow_insecure_local: true}\n",
 	}
 	for name, y := range cases {
@@ -217,6 +240,12 @@ func TestValidateGoConfig(t *testing.T) {
 		t.Fatalf("monnify without api key: %v", err)
 	}
 	c.Providers.Monnify.APIKey = "k"
+	live := true
+	c.Providers.Stripe = &StripeConfig{Livemode: &live, WebhookSecrets: []string{""}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "WebhookSecrets is required") {
+		t.Fatalf("stripe without secret: %v", err)
+	}
+	c.Providers.Stripe.WebhookSecrets = []string{"whsec_x"}
 	c.Applications["app_a"].SigningSecret = strings.Repeat("s", 32)
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)

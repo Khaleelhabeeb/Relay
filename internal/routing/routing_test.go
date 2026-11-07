@@ -108,7 +108,12 @@ func TestResolveProviders(t *testing.T) {
 		{"flutterwave", "charge.success", "A_1", Unsupported, ""},
 		{"paystack", "charge.completed", "A_1", Unsupported, ""},
 		{"flutterwave", "transfer.completed", "A_1", Unsupported, ""},
-		{"stripe", "charge.success", "A_1", Unsupported, ""},
+		{"acme", "charge.success", "A_1", Unsupported, ""},
+		{"stripe", "checkout.session.completed", "SHP_1", Matched, "shop"},
+		{"stripe", "payment_intent.succeeded", "SHP_1", Matched, "shop"},
+		{"stripe", "payment_intent.succeeded", "A_1", Unresolved, ""},
+		{"stripe", "charge.refunded", "SHP_1", Unsupported, ""},
+		{"stripe", "connect.payment_intent.succeeded", "SHP_1", Unsupported, ""},
 	}
 	for _, tc := range cases {
 		d, err := NewEngine(scoped).Resolve(context.Background(), tc.prov, tc.event, paystack.Identifiers{Reference: tc.ref}, t0, nil)
