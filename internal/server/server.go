@@ -19,6 +19,7 @@ import (
 	"github.com/khaleelhabeeb/relay/provider/flutterwave"
 	"github.com/khaleelhabeeb/relay/provider/monnify"
 	"github.com/khaleelhabeeb/relay/provider/paystack"
+	"github.com/khaleelhabeeb/relay/provider/stripe"
 )
 
 const shutdownTimeout = 15 * time.Second
@@ -122,6 +123,10 @@ func Adapters(cfg *config.Config) []provider.Adapter {
 	if p := cfg.Providers.Monnify; p != nil {
 		out = append(out, monnify.Adapter{SecretKey: p.SecretKey, ConfirmWithAPI: p.ConfirmWithAPI, APIKey: p.APIKey,
 			APIBaseURL: p.APIBaseURL, AllowUnsignedSandbox: p.AllowUnsignedSandbox})
+	}
+	if p := cfg.Providers.Stripe; p != nil {
+		out = append(out, stripe.Adapter{WebhookSecrets: p.WebhookSecrets, Livemode: p.Livemode != nil && *p.Livemode,
+			Tolerance: time.Duration(p.Tolerance), ConfirmWithAPI: p.ConfirmWithAPI, APIKey: p.APIKey, APIBaseURL: p.APIBaseURL})
 	}
 	return out
 }

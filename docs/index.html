@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Relay — route Paystack, Flutterwave and Monnify webhooks to many apps</title>
-  <meta name="description" content="Relay is a small self-hosted Go service that receives Paystack, Flutterwave and Monnify webhooks, works out which application owns each event, and delivers it there with its own signature.">
+  <title>Relay — route Paystack, Flutterwave, Monnify and Stripe webhooks to many apps</title>
+  <meta name="description" content="Relay is a small self-hosted Go service that receives Paystack, Flutterwave, Monnify and Stripe webhooks, works out which application owns each event, and delivers it there with its own signature.">
   <meta property="og:title" content="Relay">
-  <meta property="og:description" content="One Paystack, Flutterwave or Monnify account. Many applications. Every webhook delivered to the right one.">
+  <meta property="og:description" content="One Paystack, Flutterwave, Monnify or Stripe account. Many applications. Every webhook delivered to the right one.">
   <meta property="og:image" content="assets/social-preview.png">
   <link rel="icon" href="assets/relay-logo.png">
   <link rel="stylesheet" href="style.css">
@@ -35,7 +35,7 @@
       <source media="(prefers-color-scheme: dark)" srcset="assets/relay-logo-dark.png">
       <img class="hero-logo" src="assets/relay-logo.png" alt="Relay">
     </picture>
-    <h1>One Paystack, Flutterwave or Monnify account. Many applications. Every webhook delivered to the right one.</h1>
+    <h1>One Paystack, Flutterwave, Monnify or Stripe account. Many applications. Every webhook delivered to the right one.</h1>
     <p>Relay is a small self-hosted Go service. It receives your payment provider's webhooks, verifies them,
       decides which application owns each event, stores it safely, and delivers it to that application with
       its own signature.</p>
@@ -52,8 +52,8 @@
   <section class="band">
     <div class="section">
       <h2>The problem</h2>
-      <p class="lead">Paystack, Flutterwave and Monnify each send all webhooks for an account to <strong>one URL</strong>.
-        If App A, App B and App C share that account, something at that URL has to work out which application
+      <p class="lead">Paystack, Flutterwave and Monnify each send all webhooks for an account to <strong>one URL</strong>,
+        and Stripe sends every subscribed event to every endpoint. If App A, App B and App C share that account, something at that URL has to work out which application
         each payment belongs to and pass the event on. Relay is that piece. It never guesses and never
         broadcasts payment data.</p>
       <div class="grid">
@@ -72,9 +72,9 @@
             Node.js and Go.</p>
         </div>
         <div class="card">
-          <h3>Paystack, Flutterwave and Monnify</h3>
+          <h3>Paystack, Flutterwave, Monnify and Stripe</h3>
           <p>Enable any one, or several side by side, on <code>/webhooks/paystack</code>,
-            <code>/webhooks/flutterwave</code> and <code>/webhooks/monnify</code>.</p>
+            <code>/webhooks/flutterwave</code>, <code>/webhooks/monnify</code> and <code>/webhooks/stripe</code>.</p>
         </div>
       </div>
     </div>
@@ -87,6 +87,7 @@
  Paystack    ── webhook ──▶ │ verify signature ─▶ find owner ─▶ save to SQLite ─▶ 200 │
  Flutterwave ── webhook ──▶ │                                          │             │
  Monnify     ── webhook ──▶ │                                          │             │
+ Stripe      ── webhook ──▶ │                                          │             │
                             │                         delivery workers ◀┘             │
                             └──────────────┬──────────────────┬────────────────────────┘
                                            ▼                  ▼

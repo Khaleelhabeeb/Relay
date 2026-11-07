@@ -54,6 +54,7 @@ import (
 	"github.com/khaleelhabeeb/relay/provider/flutterwave"
 	"github.com/khaleelhabeeb/relay/provider/monnify"
 	"github.com/khaleelhabeeb/relay/provider/paystack"
+	"github.com/khaleelhabeeb/relay/provider/stripe"
 )
 
 // Errors returned by Relay. Compare with errors.Is.
@@ -85,9 +86,9 @@ type options struct {
 func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
 
 // WithProvider adds a provider, served at /webhooks/<a.Name()>. An adapter
-// named like a built-in provider ("paystack", "flutterwave", "monnify")
-// replaces the one configured in cfg.Providers. Routes may name the provider
-// in routes[].provider.
+// named like a built-in provider ("paystack", "flutterwave", "monnify",
+// "stripe") replaces the one configured in cfg.Providers. Routes may name the
+// provider in routes[].provider.
 func WithProvider(a provider.Adapter) Option {
 	return func(o *options) { o.adapters = append(o.adapters, a) }
 }
@@ -213,8 +214,16 @@ func missingSecret(a provider.Adapter) bool {
 		return a.SecretKey == "" || (a.ConfirmWithAPI && a.APIKey == "")
 	case *monnify.Adapter:
 		return a.SecretKey == "" || (a.ConfirmWithAPI && a.APIKey == "")
+	case stripe.Adapter:
+		return stripeMissingSecret(a)
+	case *stripe.Adapter:
+		return stripeMissingSecret(*a)
 	}
 	return false
+}
+
+func stripeMissingSecret(a stripe.Adapter) bool {
+	return !slices.ContainsFunc(a.WebhookSecrets, func(s string) bool { return s != "" }) || (a.ConfirmWithAPI && a.APIKey == "")
 }
 
 func logWarnings(cfg *config.Config, logger *slog.Logger) {
@@ -238,6 +247,9 @@ func logWarnings(cfg *config.Config, logger *slog.Logger) {
 		}
 		if p := cfg.Providers.Monnify; p != nil && !p.ConfirmWithAPI {
 			logger.Warn("providers.monnify.confirm_with_api is off: any application holding the Monnify secret key can forge webhooks that Relay delivers to the others")
+		}
+		if p := cfg.Providers.Stripe; p != nil && !p.ConfirmWithAPI {
+			logger.Warn("providers.stripe.confirm_with_api is off: anyone who obtains the endpoint signing secret can forge webhooks that Relay delivers")
 		}
 	}
 	if p := cfg.Providers.Monnify; p != nil && p.AllowUnsignedSandbox {
