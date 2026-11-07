@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -83,5 +84,57 @@ func TestOpenRejectsBadPath(t *testing.T) {
 		if _, err := Open(context.Background(), p); err == nil {
 			t.Errorf("Open(%q) should fail", p)
 		}
+	}
+}
+
+// A database from before migration 4 upgrades in place: its events need no
+// confirmation and stay deliverable.
+func TestUpgradeAddsConfirmation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := migrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.version >= 4 {
+			break
+		}
+		q, err := migrationFS.ReadFile(m.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(q)); err != nil {
+			t.Fatalf("%s: %v", m.name, err)
+		}
+		if _, err := db.Exec(`INSERT INTO schema_migrations VALUES (?, 0)`, m.version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO events (id, provider, event_type, dedup_key, raw_payload, payload_sha256,
+		received_at, last_seen_at, routing_status, application_id)
+		VALUES ('evt_old', 'paystack', 'charge.success', 'k', x'7b7d', 'x', 1, 1, 'matched', 'app_a')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	e, err := s.GetEvent(ctx, "evt_old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Confirmation != ConfirmNone || !e.Confirmation.Deliverable() || e.ConfirmAttempts != 0 || !e.ConfirmNextAt.IsZero() {
+		t.Fatalf("upgraded event: %+v", e)
 	}
 }

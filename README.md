@@ -532,7 +532,32 @@ the timestamp is fixed in the past.
   happened. Every application sharing a Paystack account holds its secret key, and anyone with
   that key can send Relay a correctly signed webhook (the same holds for Monnify's secret key, and for anyone who gets hold of a Stripe endpoint signing secret). Relay then delivers it like any other.
   Setting `confirm_with_api` on the provider makes Relay check each payment with the provider's API
-  before accepting it, but your own check is still the one that protects you.
+  before delivering it (see [Confirming with the provider's API](#confirming-with-the-providers-api)),
+  but your own check is still the one that protects you.
+
+### Confirming with the provider's API
+
+With `confirm_with_api: true`, Relay checks every routed event against the provider's API before
+it delivers it. A webhook signed with a leaked secret but not matching the provider's record is
+never delivered. The check runs when the webhook arrives:
+
+| API answer | Response to the provider | What happens |
+|---|---|---|
+| Matches | `200` | Stored and delivered as usual |
+| Doesn't match, or no such transaction | `422 not_confirmed` | Not stored, never delivered |
+| Slow, down, or not JSON | `200` | Stored and routed, but held: `confirmation` is `pending` |
+
+A held event is checked again in the background: at once, then with backoff (30 seconds doubling
+to 30 minutes, for about 72 hours), allowing each call 30 seconds instead of 8. When the
+provider confirms it, Relay creates the delivery. When the provider disowns it, it becomes
+`rejected` and is never delivered. When the 72 hours run out, it becomes `failed`; retry it
+with `relay events confirm evt_…` once the API is healthy.
+
+Relay answers `200` rather than asking the provider to retry, because providers retry only a few
+times (Flutterwave three times, 30 minutes apart) and an outage could outlast them. While an event
+is pending, a different-bytes copy with the same dedup key gets `503` until the first one is
+settled, so a forged copy that arrives first can't make the genuine one look like its duplicate.
+A rejected event gives up its dedup key for the same reason.
 
 ## Registering ownership
 
@@ -762,6 +787,9 @@ volume. Set `storage.dsn: /var/lib/relay/relay.db` in the config you mount.
 | `relay_webhooks_received_total{result="storage_error"}` rising (labelled by `provider`) | Relay can't save events; check the disk |
 | `relay_webhooks_received_total{result="invalid_signature"}` rising | Wrong Paystack secret key, Flutterwave secret hash or Monnify secret key (see the `provider` label), or someone probing the endpoint |
 | `relay_store_up` equal to 0 | The database can't be read |
+| `relay_events_awaiting_confirmation{state="failed"}` above 0 | The provider API never confirmed these events; they aren't delivered (`relay events list --confirmation failed`) |
+| `relay_events_awaiting_confirmation{state="pending"}` above 0 for an hour | The provider's API has been failing; check `relay events list --confirmation pending` |
+| `relay_confirmations_total{result="rejected"}` rising | Signed webhooks the provider disowns: someone holding the secret is forging events |
 
 Logs are JSON on stderr. They carry `event_id`, `delivery_id` and `application`, and never
 contain payment payloads or secrets.
@@ -778,8 +806,9 @@ contain payment payloads or secrets.
   the server; it refuses a mismatched database.
 - **Retention:** every 6 hours Relay clears raw payloads of delivered and `unsupported` events
   older than `retention.payload_days`, and deletes attempt history older than
-  `retention.attempt_days`. Events that are unresolved, ambiguous, pending or exhausted keep
-  their payloads until they're resolved.
+  `retention.attempt_days`. Payloads of events the provider API rejected are cleared on the same
+  schedule. Events that are unresolved, ambiguous, pending (delivery or confirmation) or
+  exhausted keep their payloads until they're resolved.
 
 ## Operating Relay
 
@@ -791,6 +820,8 @@ The `relay` CLI works against a running server. It only needs the config file, n
 | Full history of one event | `relay events inspect evt_…` (add `--show-payload` to print the payment data) |
 | Re-run routing after adding a rule | `relay events reprocess` |
 | Assign an owner yourself (recorded with a reason) | `relay events reroute evt_… --application app_b --reason "ticket 42"` |
+| Events held for provider API confirmation | `relay events list --confirmation pending` (or `failed`) |
+| Retry the API check now (after an outage) | `relay events confirm evt_…` |
 | See deliveries an application missed | `relay deliveries list --status exhausted` |
 | Replay them once the application is back | `relay deliveries retry del_…` |
 | List registrations | `relay registrations list --application app_b` |
@@ -856,8 +887,11 @@ routes:
 
 1. In the Flutterwave dashboard, go to **Settings → Webhooks**. Set the URL to your Relay address
    followed by `/webhooks/flutterwave`, for example `https://relay.yourdomain.com/webhooks/flutterwave`.
-2. Set a **secret hash** there. Use a long random value (`openssl rand -hex 32`) and put the same
-   value in `FLUTTERWAVE_SECRET_HASH`.
+2. Set a **secret hash** there. Use a random value of 48 characters (`openssl rand -hex 24`) and
+   put the same value in `FLUTTERWAVE_SECRET_HASH`. In testing, the dashboard silently dropped the
+   last character of a 64-character hash, so every webhook failed its signature check. If you
+   see `invalid signature` for Flutterwave, compare the `verif-hash` header Flutterwave sends with
+   your value.
 3. Turn on **webhook retries**.
 4. Start each payment with a `tx_ref` that carries the application's prefix, or add a marker to
    its `meta`. Applications can also register a `tx_ref` with
@@ -867,6 +901,7 @@ routes:
 |---|---|
 | **Signature** | `flutterwave-signature` (base64 HMAC-SHA256 of the body) or `verif-hash` (the secret hash itself). Either one is accepted when it's valid. |
 | **Routed events** | `charge.completed`. Other events, such as `transfer.completed`, are stored as `unsupported` until their shape is checked against real payloads. |
+| **Legacy format** | Accounts without **v3 webhooks** enabled in the dashboard get a flat body with `"event.type"` (`CARD_TRANSACTION`, `BANK_TRANSFER_TRANSACTION`, …). Relay accepts it, reads `*_TRANSACTION` as `charge.completed` and `txRef` as the reference, and deduplicates it with the v3 form of the same charge. It carries no `meta`, so route those payments by `tx_ref` prefix or registration, or enable v3 webhooks. Applications receive the body as sent. |
 | **Reference** | `data.tx_ref`, or `data.reference` for transfers |
 | **Metadata** | `data.meta`, plus the top-level `meta_data`. Where both set a key, `data.meta` wins. |
 | **Duplicates** | `<event>:<data.id>:<data.status>`, as Flutterwave recommends. A failed charge followed by a successful one with the same ID counts as two events. Anything without an ID and status falls back to a SHA-256 of the body. |

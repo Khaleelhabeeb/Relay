@@ -28,6 +28,10 @@ First release: a self-hosted Paystack webhook router.
   - `POST /webhooks/flutterwave` accepts `flutterwave-signature` (HMAC-SHA256) or `verif-hash`.
   - Routes `charge.completed` by `tx_ref` prefix, `meta`/`meta_data`, or a registered `tx_ref`.
   - Deduplicates on `event:data.id:status`.
+  - Also accepts Flutterwave's legacy webhook format (a flat body with `"event.type"`, sent by
+    accounts without v3 webhooks enabled). `*_TRANSACTION` charges are read as
+    `charge.completed`, with `txRef` as the reference; they carry no `meta`. Other legacy types
+    are stored as `unsupported`.
   - Configured under `providers.flutterwave`. Both providers are now optional, but at least one is
     required.
 - **Monnify provider.**
@@ -97,7 +101,16 @@ First release: a self-hosted Paystack webhook router.
     against the provider's verify API (Paystack `GET /transaction/verify/:reference`,
     Flutterwave `GET /v3/transactions/:id/verify`, which needs the new
     `providers.flutterwave.secret_key_env`). Mismatches get `422 not_confirmed` and are never
-    stored, and an unreachable API gets `503`. Adapters can implement `provider.Confirmer`.
+    stored. Adapters can implement `provider.Confirmer`.
+  - When the provider API is slow or down, the event is acknowledged (`200`), stored and routed,
+    but held with `confirmation: pending` (migration 0004). A background worker retries the check
+    with backoff for about 72 hours (30 s per call). It delivers the event once confirmed, marks
+    it `rejected` (never delivered; its dedup key is released) if the provider disowns it, or
+    `failed` when the window closes. `relay events confirm` retries it, and `relay events list
+    --confirmation` filters on it. A different-bytes copy of a pending event gets `503` until the
+    first one is settled. New metrics: `relay_confirmations_total` and
+    `relay_events_awaiting_confirmation`. Previously an unreachable API got `503`, so an outage
+    longer than the provider's retries lost the event.
   - A duplicate webhook whose reference or virtual account differs from the stored event is kept
     in `dedup_conflicts` (migration 0003). It is logged as an error, counted as
     `result="dedup_conflict"`, and shown by `relay events inspect`.

@@ -210,7 +210,7 @@ func (s *Store) UnresolvedEventIDs(ctx context.Context, provider, identifierType
 		column = "dedicated_account"
 	}
 	rows, err := s.r.QueryContext(ctx, `SELECT id FROM events WHERE provider = ? AND `+column+` = ?
-		AND routing_status = 'unresolved' AND received_at >= ? ORDER BY received_at`, provider, value, ms(since))
+		AND routing_status = 'unresolved' AND confirmation != 'rejected' AND received_at >= ? ORDER BY received_at`, provider, value, ms(since))
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +239,8 @@ func (t *Tx) SetEventRouting(ctx context.Context, id string, outcome routing.Out
 }
 
 // ApplyDecision records a routing decision for an event and, when it
-// matched, creates the pending delivery (due at). It does not change the
+// matched and the event is deliverable (see Confirmation), creates the
+// pending delivery (due at). It does not change the
 // event row; callers inserting or updating the event set routing_status.
 func (t *Tx) ApplyDecision(ctx context.Context, eventID string, d routing.Decision, decidedBy string, at time.Time) error {
 	if err := t.InsertRoutingDecision(ctx, &RoutingDecision{
@@ -255,6 +256,15 @@ func (t *Tx) ApplyDecision(ctx context.Context, eventID string, d routing.Decisi
 		return err
 	}
 	if d.Outcome != routing.Matched {
+		return nil
+	}
+	// An event awaiting (or refused) provider API confirmation is routed but
+	// not delivered; ConfirmEvent creates the delivery once it is confirmed.
+	var conf Confirmation
+	if err := t.tx.QueryRowContext(ctx, `SELECT confirmation FROM events WHERE id = ?`, eventID).Scan(&conf); err != nil {
+		return err
+	}
+	if !conf.Deliverable() {
 		return nil
 	}
 	return t.InsertDelivery(ctx, &Delivery{

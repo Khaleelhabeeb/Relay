@@ -19,6 +19,7 @@ import (
 	"github.com/khaleelhabeeb/relay/config"
 	"github.com/khaleelhabeeb/relay/internal/ingest"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
+	"github.com/khaleelhabeeb/relay/internal/store"
 	"github.com/khaleelhabeeb/relay/provider"
 	"github.com/khaleelhabeeb/relay/provider/flutterwave"
 	"github.com/khaleelhabeeb/relay/provider/monnify"
@@ -450,8 +451,10 @@ func TestWebhookConfirmWithAPI(t *testing.T) {
 	if s, code := send(`{"id":77,"reference":"APPA_1","status":"success","amount":90000,"currency":"NGN"}`); s != http.StatusUnprocessableEntity || code != "not_confirmed" {
 		t.Fatalf("forged amount: %d %s", s, code)
 	}
+	// An API outage no longer refuses the webhook (the provider's few retries
+	// could run out): the event is stored pending and confirmed later.
 	apiStatus = http.StatusInternalServerError
-	if s, code := send(`{"id":77,"reference":"APPA_1","status":"success","amount":500,"currency":"NGN"}`); s != http.StatusServiceUnavailable || code != "confirmation_unavailable" {
+	if s, code := send(`{"id":78,"reference":"APPA_2","status":"success","amount":500,"currency":"NGN"}`); s != http.StatusOK {
 		t.Fatalf("API outage: %d %s", s, code)
 	}
 	before := calls
@@ -459,7 +462,15 @@ func TestWebhookConfirmWithAPI(t *testing.T) {
 	if s, code := post(t, ts.URL, body, paystack.Sign(secret, body)); s != http.StatusOK || calls != before {
 		t.Fatalf("unrouted type: %d %s, API calls %d→%d", s, code, before, calls)
 	}
-	if len(rec.got) != 2 {
-		t.Fatalf("acceptor got %d events, want the genuine charge and the transfer", len(rec.got))
+	if len(rec.got) != 3 {
+		t.Fatalf("acceptor got %d events, want the genuine charge, the deferred one and the transfer", len(rec.got))
+	}
+	for i, want := range []store.Confirmation{store.ConfirmConfirmed, store.ConfirmPending, ""} {
+		if got := rec.got[i].Confirmation; got != want {
+			t.Errorf("event %d confirmation = %q, want %q", i, got, want)
+		}
+	}
+	if a := rec.got[1]; a.ConfirmError == "" || !a.ConfirmNextAt.Equal(a.ReceivedAt) {
+		t.Errorf("deferred event: error %q, next %v (received %v)", a.ConfirmError, a.ConfirmNextAt, a.ReceivedAt)
 	}
 }

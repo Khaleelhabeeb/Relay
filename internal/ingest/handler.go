@@ -14,6 +14,7 @@ import (
 
 	"github.com/khaleelhabeeb/relay/internal/apierr"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
+	"github.com/khaleelhabeeb/relay/internal/store"
 	"github.com/khaleelhabeeb/relay/provider"
 )
 
@@ -23,6 +24,13 @@ type Accepted struct {
 	Identifiers provider.Identifiers
 	DedupKey    string
 	ReceivedAt  time.Time
+	// Confirmation is store.ConfirmConfirmed after a successful API check,
+	// store.ConfirmPending when the API could not be reached (the event is
+	// stored but not delivered until a background check succeeds), and empty
+	// when the adapter does not confirm events.
+	Confirmation  store.Confirmation
+	ConfirmError  string
+	ConfirmNextAt time.Time
 }
 
 // Acceptor durably records an accepted event. A nil error means it is safe
@@ -115,6 +123,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ids := h.Adapter.ExtractIdentifiers(evt)
+	var (
+		confirmation store.Confirmation
+		confirmErr   string
+		receivedAt   = h.now()
+	)
 	if c, ok := h.Adapter.(provider.Confirmer); ok && h.Adapter.Routes(evt.Type) {
 		cctx, cancel := context.WithTimeout(r.Context(), confirmTimeout)
 		err := c.Confirm(cctx, evt, ids)
@@ -129,13 +142,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			apierr.Write(w, http.StatusUnprocessableEntity, apierr.NotConfirmed, "event does not match the provider's record")
 			return
 		case err != nil:
-			log.Error("webhook refused: provider API confirmation failed", "event_type", evt.Type, "error", err)
-			h.Metrics.Webhook(name, "confirm_error")
-			apierr.Write(w, http.StatusServiceUnavailable, apierr.ConfirmUnavailable, "event could not be confirmed, retry later")
-			return
+			// The API is unreachable or slow: store the event now, deliver
+			// nothing until the background confirmer gets an answer. Asking
+			// the provider to retry instead would lose the event once its
+			// (few) retries ran out.
+			log.Warn("provider API confirmation failed; storing the event and confirming in the background",
+				"event_type", evt.Type, "error", err)
+			confirmation, confirmErr = store.ConfirmPending, err.Error()
+		default:
+			confirmation = store.ConfirmConfirmed
 		}
 	}
-	a := &Accepted{Event: evt, Identifiers: ids, DedupKey: h.Adapter.DedupKey(evt, ids), ReceivedAt: h.now()}
+	a := &Accepted{Event: evt, Identifiers: ids, DedupKey: h.Adapter.DedupKey(evt, ids), ReceivedAt: receivedAt,
+		Confirmation: confirmation, ConfirmError: confirmErr}
+	if confirmation == store.ConfirmPending {
+		// Due at once: the background check allows a slow API far longer
+		// than the ingest check could.
+		a.ConfirmNextAt = receivedAt
+	}
 	log = log.With("event_type", evt.Type, "dedup_key", a.DedupKey)
 
 	defer func() { h.Metrics.AcceptLatency(time.Since(start)) }()
@@ -145,7 +169,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		apierr.Write(w, http.StatusServiceUnavailable, apierr.StorageUnavailable, "event could not be stored")
 		return
 	}
-	if err := h.Acceptor.Accept(r.Context(), a); err != nil {
+	if err := h.Acceptor.Accept(r.Context(), a); errors.Is(err, ErrConfirmationPending) {
+		log.Warn("webhook refused: an earlier copy with different bytes awaits provider API confirmation")
+		h.Metrics.Webhook(name, "confirm_pending")
+		w.Header().Set("Retry-After", "60")
+		apierr.Write(w, http.StatusServiceUnavailable, apierr.ConfirmUnavailable, "an earlier copy of this event is awaiting confirmation, retry later")
+		return
+	} else if err != nil {
 		log.Error("webhook refused: accept failed", "error", err)
 		h.Metrics.Webhook(name, "storage_error")
 		apierr.Write(w, http.StatusServiceUnavailable, apierr.StorageUnavailable, "event could not be stored")

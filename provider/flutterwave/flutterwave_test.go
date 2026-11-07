@@ -136,6 +136,8 @@ func TestExtractIdentifiers(t *testing.T) {
 			"charge.completed:285959877:successful"},
 		{"charge_failed.json", "408136545", "APPA_1612345678", "card", nil, "charge.completed:408136545:failed"},
 		{"transfer_completed.json", "33286", "APPA_TRF_5", "", nil, "transfer.completed:33286:successful"},
+		{"legacy_bank_transfer.json", "1000001", "APPA_LEGACY_1001", "bank_transfer", nil,
+			"charge.completed:1000001:successful"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {

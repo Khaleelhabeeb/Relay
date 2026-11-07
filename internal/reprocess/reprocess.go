@@ -120,6 +120,9 @@ func (r *Reprocessor) Reroute(ctx context.Context, eventID, application, reason 
 		if e.RoutingStatus != routing.Unresolved && e.RoutingStatus != routing.Ambiguous {
 			return fmt.Errorf("%w (status is %s)", ErrNotReroutable, e.RoutingStatus)
 		}
+		if e.Confirmation == store.ConfirmRejected {
+			return fmt.Errorf("%w (the provider API rejected it: %s)", ErrNotReroutable, e.ConfirmError)
+		}
 		if len(e.RawPayload) == 0 {
 			return errors.New("reprocess: event payload has been purged; it cannot be delivered")
 		}

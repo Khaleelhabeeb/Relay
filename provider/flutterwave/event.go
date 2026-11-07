@@ -15,24 +15,31 @@ import (
 
 var ErrMalformedEvent = errors.New("flutterwave: malformed event")
 
-// Parse decodes a verified webhook body. It requires a non-empty "event"
-// string and a JSON object "data". Payloads without that envelope (virtual
-// card debits, some refunds) are rejected as malformed.
+// Parse decodes a verified webhook body. A v3 webhook needs a non-empty
+// "event" string and a JSON object "data". A body without "event" but with
+// a legacy "event.type" is read as a legacy webhook (see legacy.go). Other
+// payloads (virtual card debits, some refunds) are rejected as malformed.
 func Parse(raw []byte) (*provider.Event, error) {
 	var env struct {
-		Event string          `json:"event"`
+		Event *string         `json:"event"`
 		Data  json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrMalformedEvent, err)
 	}
-	if strings.TrimSpace(env.Event) == "" {
+	if env.Event == nil {
+		if e := parseLegacy(raw); e != nil {
+			return e, nil
+		}
+		return nil, fmt.Errorf("%w: missing event type", ErrMalformedEvent)
+	}
+	if strings.TrimSpace(*env.Event) == "" {
 		return nil, fmt.Errorf("%w: missing event type", ErrMalformedEvent)
 	}
 	if d := bytes.TrimSpace(env.Data); len(d) == 0 || d[0] != '{' {
 		return nil, fmt.Errorf("%w: data must be an object", ErrMalformedEvent)
 	}
-	return &provider.Event{Provider: provider.Flutterwave, Type: env.Event, Data: env.Data, Raw: raw}, nil
+	return &provider.Event{Provider: provider.Flutterwave, Type: *env.Event, Data: env.Data, Raw: raw}, nil
 }
 
 // ExtractIdentifiers reads ownership identifiers. The reference is

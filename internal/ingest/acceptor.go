@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 
 	"github.com/khaleelhabeeb/relay/internal/ids"
@@ -23,7 +24,16 @@ type StoreAcceptor struct {
 	// OnRouted, if set, is called after a commit that created a delivery
 	// (e.g. to wake the dispatcher). It must not block.
 	OnRouted func()
+	// OnPending, if set, is called after storing an event that awaits
+	// provider API confirmation (e.g. to wake the confirmer). It must not block.
+	OnPending func()
 }
+
+// ErrConfirmationPending means an earlier webhook with the same dedup key
+// but different bytes is still awaiting provider API confirmation. Counting
+// this one as its duplicate could drop the genuine event if the earlier one
+// is later rejected, so the provider is asked to retry instead.
+var ErrConfirmationPending = errors.New("ingest: an earlier copy of this event is awaiting confirmation")
 
 func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
 	prov := a.Event.Provider
@@ -45,6 +55,9 @@ func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
 			return err
 		}
 		if found {
+			if existing.Confirmation == store.ConfirmPending && existing.PayloadSHA256 != hex.EncodeToString(sum[:]) {
+				return ErrConfirmationPending
+			}
 			eventID, duplicate, stored = existing.ID, true, existing
 			// A genuine resend carries the same identifiers. One that does
 			// not was forged by a holder of the provider secret, or forged
@@ -79,6 +92,10 @@ func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
 			RoutingStatus:    decision.Outcome,
 			ApplicationID:    decision.Application,
 			DedicatedAccount: dva,
+			Confirmation:     a.Confirmation,
+		}
+		if a.Confirmation == store.ConfirmPending {
+			e.ConfirmAttempts, e.ConfirmNextAt, e.ConfirmError = 1, a.ConfirmNextAt, a.ConfirmError
 		}
 		if err := tx.InsertEvent(ctx, e); err != nil {
 			return err
@@ -106,6 +123,13 @@ func (s *StoreAcceptor) Accept(ctx context.Context, a *Accepted) error {
 			"stored_dedicated_account", stored.DedicatedAccount, "dedicated_account", conflict.DedicatedAccount)
 	case duplicate:
 		log.Info("duplicate webhook; existing event kept")
+	case a.Confirmation == store.ConfirmPending:
+		s.Metrics.Confirmation(prov, "deferred")
+		log.Warn("event stored; delivery waits for provider API confirmation, retrying in the background",
+			"routing_status", decision.Outcome, "application", decision.Application, "confirm_error", a.ConfirmError)
+		if s.OnPending != nil {
+			s.OnPending()
+		}
 	case decision.Outcome == routing.Matched:
 		log.Info("event routed", "application", decision.Application)
 		if s.OnRouted != nil {
