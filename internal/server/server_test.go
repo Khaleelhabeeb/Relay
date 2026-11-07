@@ -23,6 +23,7 @@ import (
 	"github.com/khaleelhabeeb/relay/provider/flutterwave"
 	"github.com/khaleelhabeeb/relay/provider/monnify"
 	"github.com/khaleelhabeeb/relay/provider/paystack"
+	"github.com/khaleelhabeeb/relay/provider/stripe"
 )
 
 const secret = "sk_test_relay_fixture_secret"
@@ -47,6 +48,8 @@ func testConfig() *config.Config {
 	c.Providers.Paystack = &config.PaystackConfig{Secret: secret}
 	c.Providers.Flutterwave = &config.FlutterwaveConfig{SecretHash: flwSecret}
 	c.Providers.Monnify = &config.MonnifyConfig{SecretKey: mnfySecret}
+	testMode := false
+	c.Providers.Stripe = &config.StripeConfig{WebhookSecrets: []string{stripeSecret}, Livemode: &testMode}
 	return c
 }
 
@@ -218,6 +221,65 @@ func TestMonnifyWebhook(t *testing.T) {
 	if a := rec.got[1]; a.Identifiers.Reference != "APPB_CUST_1636106097661" ||
 		a.Identifiers.DedicatedAccount == nil || a.Identifiers.DedicatedAccount.Key() != "sterling bank:6000140770" {
 		t.Fatalf("reserved account identifiers: %+v", a.Identifiers)
+	}
+}
+
+const stripeSecret = "whsec_relay_server_secret"
+
+func TestStripeWebhook(t *testing.T) {
+	read := func(name string) []byte {
+		b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "stripe", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bytes.TrimSpace(b)
+	}
+	send := func(ts *httptest.Server, body []byte, sig string) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/webhooks/stripe", bytes.NewReader(body))
+		if sig != "" {
+			req.Header.Set("Stripe-Signature", sig)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	rec := &recorder{}
+	ts := newTestServer(t, rec)
+	now := time.Now()
+	cs, pi := read("checkout_session_completed.json"), read("payment_intent_succeeded.json")
+	for _, body := range [][]byte{cs, pi} {
+		if s := send(ts, body, stripe.Sign(stripeSecret, body, now)); s != http.StatusOK {
+			t.Fatalf("signed: status %d", s)
+		}
+	}
+	live := bytes.Replace(cs, []byte(`"livemode":false,"pending`), []byte(`"livemode":true,"pending`), 1)
+	for name, tc := range map[string]struct {
+		body []byte
+		sig  string
+	}{
+		"unsigned":       {cs, ""},
+		"wrong secret":   {cs, stripe.Sign("whsec_other", cs, now)},
+		"replayed":       {cs, stripe.Sign(stripeSecret, cs, now.Add(-time.Hour))},
+		"live in test":   {live, stripe.Sign(stripeSecret, live, now)},
+		"monnify scheme": {cs, monnify.Sign(stripeSecret, cs)},
+	} {
+		if s := send(ts, tc.body, tc.sig); s != http.StatusUnauthorized {
+			t.Errorf("%s: status %d, want 401", name, s)
+		}
+	}
+	if len(rec.got) != 2 {
+		t.Fatalf("acceptor got %d events, want 2", len(rec.got))
+	}
+	if a := rec.got[0]; a.Event.Provider != "stripe" || a.Event.Type != "checkout.session.completed" ||
+		a.Identifiers.Reference != "APPA_order_1001" || a.Identifiers.TransactionID != "pi_3RelayFixturePI0001" ||
+		a.DedupKey != "evt:evt_1RelayFixtureCS0001" {
+		t.Fatalf("unexpected accepted event: %+v", a)
+	}
+	if a := rec.got[1]; a.Identifiers.Reference != "APPA_order_1003" || a.DedupKey != "evt:evt_3RelayFixturePI0003" {
+		t.Fatalf("payment intent identifiers: %+v", a)
 	}
 }
 

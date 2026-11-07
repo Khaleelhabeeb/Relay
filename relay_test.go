@@ -21,6 +21,7 @@ import (
 	"github.com/khaleelhabeeb/relay/provider/flutterwave"
 	"github.com/khaleelhabeeb/relay/provider/monnify"
 	"github.com/khaleelhabeeb/relay/provider/paystack"
+	"github.com/khaleelhabeeb/relay/provider/stripe"
 	"github.com/khaleelhabeeb/relay/receiver"
 )
 
@@ -223,7 +224,8 @@ func TestNewRejectsBadConfig(t *testing.T) {
 	}
 	for _, a := range []provider.Adapter{paystack.Adapter{}, &paystack.Adapter{}, flutterwave.Adapter{}, &flutterwave.Adapter{},
 		flutterwave.Adapter{SecretHash: "h", ConfirmWithAPI: true}, monnify.Adapter{}, &monnify.Adapter{},
-		monnify.Adapter{SecretKey: "s", ConfirmWithAPI: true}} {
+		monnify.Adapter{SecretKey: "s", ConfirmWithAPI: true}, stripe.Adapter{}, &stripe.Adapter{},
+		stripe.Adapter{WebhookSecrets: []string{""}}, stripe.Adapter{WebhookSecrets: []string{"whsec_x"}, ConfirmWithAPI: true}} {
 		cfg = testConfig(t, "http://127.0.0.1:1", "http://127.0.0.1:2")
 		if _, err := relay.New(ctx, cfg, relay.WithProvider(a)); err == nil || !strings.Contains(err.Error(), "empty secret") {
 			t.Errorf("%T without secret: %v", a, err)

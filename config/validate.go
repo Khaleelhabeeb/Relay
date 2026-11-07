@@ -62,7 +62,25 @@ func (c *Config) validate(extraProviders []string) []error {
 	}
 	providers := append(c.Providers.Names(), extraProviders...)
 	if len(providers) == 0 {
-		fail("providers: at least one provider (paystack, flutterwave or monnify) is required")
+		fail("providers: at least one provider (paystack, flutterwave, monnify or stripe) is required")
+	}
+	if p := c.Providers.Stripe; p != nil {
+		if p.Livemode == nil {
+			fail("providers.stripe.livemode: required; true for live events, false for test mode")
+		}
+		if t := time.Duration(p.Tolerance); t != 0 && (t < time.Minute || t > 15*time.Minute) {
+			fail("providers.stripe.tolerance: must be between 1m and 15m")
+		}
+		if p.APIBaseURL != "" {
+			if u, err := url.Parse(p.APIBaseURL); err != nil || u.Scheme != "https" || u.Host == "" {
+				fail("providers.stripe.api_base_url: must be an absolute https URL")
+			}
+		}
+		if p.Livemode != nil && p.APIKey != "" {
+			if test, known := stripeKeyIsTest(p.APIKey); known && test == *p.Livemode {
+				fail("providers.stripe.api_key_env: the key is a %s key but livemode is %t", map[bool]string{true: "test-mode", false: "live"}[test], *p.Livemode)
+			}
+		}
 	}
 	if m := c.Providers.Monnify; m != nil {
 		if m.APIBaseURL != "" {
@@ -287,4 +305,16 @@ func validIPOrPrefix(s string) bool {
 	}
 	_, err := netip.ParsePrefix(s)
 	return err == nil
+}
+
+// stripeKeyIsTest reports whether a Stripe secret or restricted key is a
+// test-mode key; known is false for an unrecognized prefix.
+func stripeKeyIsTest(key string) (test, known bool) {
+	switch {
+	case strings.HasPrefix(key, "sk_test_"), strings.HasPrefix(key, "rk_test_"):
+		return true, true
+	case strings.HasPrefix(key, "sk_live_"), strings.HasPrefix(key, "rk_live_"):
+		return false, true
+	}
+	return false, false
 }

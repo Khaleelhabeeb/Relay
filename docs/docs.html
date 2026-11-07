@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Relay documentation</title>
-  <meta name="description" content="Install, configure and operate Relay, the self-hosted webhook router for Paystack, Flutterwave and Monnify.">
+  <meta name="description" content="Install, configure and operate Relay, the self-hosted webhook router for Paystack, Flutterwave, Monnify and Stripe.">
   <link rel="icon" href="assets/relay-logo.png">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -43,6 +43,7 @@
       <li><a href="#registering-ownership">Registering ownership</a></li>
       <li><a href="#flutterwave">Flutterwave</a></li>
       <li><a href="#monnify">Monnify</a></li>
+      <li><a href="#stripe">Stripe</a></li>
       <li><a href="#go-library">Go library</a></li>
     </ul>
     <h4>Reference</h4>
@@ -59,7 +60,8 @@
 
   <main class="content">
     <h1 id="overview">Relay documentation</h1>
-    <p>Paystack, Flutterwave and Monnify each send all webhooks for an account to <strong>one URL</strong>. If several of
+    <p>Paystack, Flutterwave and Monnify each send all webhooks for an account to <strong>one URL</strong>, and
+      Stripe sends every subscribed event to every endpoint. If several of
       your applications share that account, such as App A, App B and App C, you need something at that URL that
       works out which application each payment belongs to and passes the event on to it.</p>
     <p><strong>Relay</strong> is that piece. It receives your payment provider's webhooks, verifies them, decides
@@ -73,10 +75,11 @@
         the provider only after the event is committed to disk. Delivery is at least once, and recipients deduplicate
         on a stable event ID.</li>
       <li><strong>Language-agnostic.</strong> Your applications receive a plain signed HTTP POST, so no SDK is needed.</li>
-      <li><strong>Paystack, Flutterwave and Monnify.</strong> Enable any one, or several side by side. Each provider
-        has its own endpoint: <code>/webhooks/paystack</code>, <code>/webhooks/flutterwave</code> or
-        <code>/webhooks/monnify</code>. Most examples use Paystack; the <a href="#flutterwave">Flutterwave</a> and
-        <a href="#monnify">Monnify</a> sections cover what's different.</li>
+      <li><strong>Paystack, Flutterwave, Monnify and Stripe.</strong> Enable any one, or several side by side. Each
+        provider has its own endpoint: <code>/webhooks/paystack</code>, <code>/webhooks/flutterwave</code>,
+        <code>/webhooks/monnify</code> or <code>/webhooks/stripe</code>. Most examples use Paystack; the
+        <a href="#flutterwave">Flutterwave</a>, <a href="#monnify">Monnify</a> and <a href="#stripe">Stripe</a>
+        sections cover what's different.</li>
     </ul>
     <div class="note">Relay does <strong>not</strong> process payments, hold money or replace checking a transaction
       with your payment provider.</div>
@@ -87,6 +90,7 @@
  Paystack    ── webhook ──▶ │ verify signature ─▶ find owner ─▶ save to SQLite ─▶ 200 │
  Flutterwave ── webhook ──▶ │                                          │             │
  Monnify     ── webhook ──▶ │                                          │             │
+ Stripe      ── webhook ──▶ │                                          │             │
                             │                         delivery workers ◀┘             │
                             └──────────────┬──────────────────┬────────────────────────┘
                                            ▼                  ▼
@@ -95,12 +99,15 @@
     <ol>
       <li>The provider posts a webhook to Relay. Paystack posts to
         <code>https://relay.example.com/webhooks/paystack</code>, Flutterwave to
-        <code>https://relay.example.com/webhooks/flutterwave</code>, and Monnify to
-        <code>https://relay.example.com/webhooks/monnify</code>.</li>
+        <code>https://relay.example.com/webhooks/flutterwave</code>, Monnify to
+        <code>https://relay.example.com/webhooks/monnify</code>, and Stripe to
+        <code>https://relay.example.com/webhooks/stripe</code>.</li>
       <li>Relay checks the signature against the raw request body. For Paystack that's
         <code>x-paystack-signature</code>, made with your secret key. For Flutterwave it's
         <code>flutterwave-signature</code> or <code>verif-hash</code>, made with your secret hash. For Monnify it's
-        <code>monnify-signature</code>, made with your client secret key. Forged requests are rejected.</li>
+        <code>monnify-signature</code>, made with your client secret key. For Stripe it's
+        <code>Stripe-Signature</code>, made with the endpoint's signing secret and timestamped against replays.
+        Forged requests are rejected.</li>
       <li>Relay finds the owner. It looks at the transaction's <strong>reference prefix</strong>, its
         <strong>metadata</strong>, and any <strong>references or virtual accounts your applications registered</strong>
         through Relay's API.</li>
@@ -116,11 +123,13 @@
       <tr><td>Conflicting owners</td><td><code>ambiguous</code></td><td>Held. You decide from the CLI.</td></tr>
       <tr><td>An event type Relay doesn't route yet</td><td><code>unsupported</code></td><td>Stored for audit, nothing to do</td></tr>
     </table>
-    <p>Relay currently routes successful charges:</p>
+    <p>Relay currently routes these payment events:</p>
     <ul>
       <li><strong>Paystack:</strong> <code>charge.success</code>, both checkout payments and deposits into dedicated virtual accounts.</li>
       <li><strong>Flutterwave:</strong> <code>charge.completed</code>.</li>
       <li><strong>Monnify:</strong> <code>SUCCESSFUL_TRANSACTION</code>, both checkout payments and deposits into reserved accounts.</li>
+      <li><strong>Stripe:</strong> <code>checkout.session.*</code> (completed, async payment succeeded/failed, expired) and
+        <code>payment_intent.*</code> (succeeded, payment failed, processing, canceled).</li>
     </ul>
     <p>Refunds, transfers, disputes and subscriptions are stored but not forwarded yet; see the <a href="#faq">FAQ</a>.
       Customer IDs and emails are never used to decide ownership, because one customer can pay several of your
@@ -183,6 +192,9 @@ providers:                                    # enable one or more
     secret_hash_env: FLUTTERWAVE_SECRET_HASH  # the secret hash from Flutterwave's webhook settings
   monnify:
     secret_key_env: MONNIFY_SECRET_KEY        # your Monnify client secret key
+  stripe:
+    webhook_secret_envs: [STRIPE_WEBHOOK_SECRET]  # the Relay endpoint's signing secret (whsec_…)
+    livemode: true                            # false for test mode
 
 applications:
   app_a:
@@ -214,7 +226,9 @@ routes:
     <p>When your application starts a transaction, include something Relay can recognise. Pick one approach per
       application. For Flutterwave, the reference is <code>tx_ref</code> and the metadata is <code>meta</code>, as
       shown in <a href="#flutterwave">Flutterwave</a>. For Monnify, they are <code>paymentReference</code> and
-      <code>metaData</code>, as shown in <a href="#monnify">Monnify</a>.</p>
+      <code>metaData</code>, as shown in <a href="#monnify">Monnify</a>. For Stripe, they are
+      <code>client_reference_id</code> (or <code>metadata.reference</code>) and <code>metadata</code>, as shown in
+      <a href="#stripe">Stripe</a>.</p>
     <p><strong>A reference prefix.</strong> Start every reference with the application's prefix:</p>
 <pre><code>curl https://api.paystack.co/transaction/initialize \
   -H "Authorization: Bearer $PAYSTACK_SECRET_KEY" -H "Content-Type: application/json" \
@@ -245,6 +259,7 @@ routes:
 <pre><code>export PAYSTACK_SECRET_KEY=sk_live_...          # if paystack is enabled
 export FLUTTERWAVE_SECRET_HASH=...              # if flutterwave is enabled
 export MONNIFY_SECRET_KEY=...                   # if monnify is enabled
+export STRIPE_WEBHOOK_SECRET=whsec_...          # if stripe is enabled
 export APP_A_RELAY_SECRET=...
 export APP_B_RELAY_SECRET=...
 export APP_B_RELAY_TOKEN=...
@@ -262,6 +277,9 @@ relay serve -c relay.yaml</code></pre>
       <code>FLUTTERWAVE_SECRET_HASH</code>, and turn on retries.</p>
     <p><strong>Monnify:</strong> in <strong>Developers → Webhook URLs</strong>, set the Transaction Completion URL to
       <code>https://relay.yourdomain.com/webhooks/monnify</code>. See <a href="#monnify">Monnify</a>.</p>
+    <p><strong>Stripe:</strong> in <strong>Developers → Webhooks</strong>, add an endpoint at
+      <code>https://relay.yourdomain.com/webhooks/stripe</code> for the routed events, and put its signing secret in
+      <code>STRIPE_WEBHOOK_SECRET</code>. See <a href="#stripe">Stripe</a>.</p>
     <div class="note">Try it with your <strong>test</strong> keys first. Make a test payment for each application and
       confirm it arrives, and that nothing appears in <code>relay events list --status unresolved</code>. Before you
       switch live traffic, read <a href="#switching">Switching your provider to Relay</a>.</div>
@@ -276,13 +294,13 @@ X-Relay-Event-ID: evt_01JBQ7Z3K9X2R4T6V8W0Y2A4C6     ← stable for this event; 
 X-Relay-Delivery-ID: del_01JBQ7Z3M4ABCDEFGHJKMNPQRS
 X-Relay-Timestamp: 1793570000
 X-Relay-Attempt: 1
-X-Relay-Provider: paystack                     ← or flutterwave, monnify
+X-Relay-Provider: paystack                     ← or flutterwave, monnify, stripe
 X-Relay-Signature: v1=fe8e97a7670f414a34ec2115f47bcda1ff597e880bfe6c5edf3b823ff2b12b7f
 
 {"event":"charge.success","data":{ ... exactly as the provider sent it ... }}</code></pre>
     <table>
       <tr><td><strong>Body, <code>original</code> format</strong> (default)</td><td>The exact bytes the provider sent</td></tr>
-      <tr><td><strong><code>X-Relay-Provider</code></strong></td><td><code>paystack</code>, <code>flutterwave</code> or <code>monnify</code>. It isn't signed; the body itself identifies the provider.</td></tr>
+      <tr><td><strong><code>X-Relay-Provider</code></strong></td><td><code>paystack</code>, <code>flutterwave</code>, <code>monnify</code> or <code>stripe</code>. It isn't signed; the body itself identifies the provider.</td></tr>
       <tr><td><strong>Body, <code>envelope</code> format</strong></td><td><code>{"relay_version":1,"id":"evt_…","type":"charge.success","provider":"paystack","application":"app_b","received_at":"2026-11-02T10:15:42.123Z","payload":{ original event, byte for byte }}</code></td></tr>
       <tr><td><strong>Success</strong></td><td>Any <code>2xx</code> response</td></tr>
       <tr><td><strong>Retried</strong></td><td>Timeouts, connection errors, non-<code>2xx</code> responses and redirects (never followed). By default 10 attempts over about 24 hours: immediately, then after 30s, 2m, 10m, 30m, 1h, 2h, 4h, 8h and 8h, each ±20%.</td></tr>
@@ -461,7 +479,7 @@ export async function POST(req: Request) {
       <tr><td><code>GET /v1/registrations?type=&amp;active=&amp;limit=&amp;after=</code></td><td>List your own registrations, paginated (<code>limit</code> 1–500, follow <code>next</code>)</td></tr>
       <tr><td><code>DELETE /v1/registrations/{id}</code></td><td>Deactivate one of your registrations</td></tr>
     </table>
-<pre><code># A transaction reference, before or after the payment ("provider" is paystack, flutterwave or monnify)
+<pre><code># A transaction reference, before or after the payment ("provider" is paystack, flutterwave, monnify or stripe)
 curl -X POST http://127.0.0.1:8081/v1/registrations \
   -H "Authorization: Bearer $APP_B_RELAY_TOKEN" \
   -d '{"provider":"paystack","type":"transaction_reference","value":"APPB_ORDER_1001"}'
@@ -540,6 +558,14 @@ providers:                      # at least one provider
     api_key_env: MONNIFY_API_KEY      # required with confirm_with_api: Monnify API key (MK_...)
     api_base_url: ""                  # default https://api.monnify.com; https://sandbox.monnify.com for sandbox
     allow_unsigned_sandbox: false     # sandbox only: accept unsigned webhooks the sandbox API confirms (see Monnify)
+  stripe:
+    webhook_secret_envs: [STRIPE_WEBHOOK_SECRET]  # required: endpoint signing secret(s) (whsec_...); list two while rolling
+    livemode: false                   # required: false accepts only test-mode events, true only live events
+    tolerance: 5m                     # max age of the Stripe-Signature timestamp (1m-15m)
+    allowed_ips: []                   # optional; Stripe publishes its webhook IPs
+    confirm_with_api: false           # fetch each routed event from Stripe's events API before accepting it
+    api_key_env: STRIPE_API_KEY       # required with confirm_with_api: sk_... or restricted rk_... with Events: read
+    api_base_url: ""                  # default https://api.stripe.com
 
 applications:
   app_b:                         # application ID: lowercase letters, digits, _ or -
@@ -554,8 +580,8 @@ routes:                         # static ownership rules
   - application: app_b
     provider: paystack          # optional: only events from this provider; omitted = every provider
     match:
-      reference_prefix: "APPB_" # reference starts with this (case-sensitive): Paystack data.reference, Flutterwave data.tx_ref, Monnify paymentReference (accountReference for reserved accounts)
-      metadata:                 # every key equals its value (Paystack data.metadata; Flutterwave data.meta / meta_data; Monnify metaData)
+      reference_prefix: "APPB_" # reference starts with this (case-sensitive): Paystack data.reference, Flutterwave data.tx_ref, Monnify paymentReference (accountReference for reserved accounts), Stripe client_reference_id or metadata.reference
+      metadata:                 # every key equals its value (Paystack data.metadata; Flutterwave data.meta / meta_data; Monnify metaData; Stripe data.object.metadata)
         app: "app_b"             # both matchers set: both must match
 
 delivery:
@@ -609,7 +635,9 @@ server:
         <li><strong>Each provider has its own <code>allowed_ips</code>.</strong> Flutterwave says its IP addresses are
           dynamic, so leave <code>providers.flutterwave.allowed_ips</code> empty unless Flutterwave gives you a fixed
           list. Monnify publishes one address, <code>35.242.133.146</code>, which you can put in
-          <code>providers.monnify.allowed_ips</code>.</li>
+          <code>providers.monnify.allowed_ips</code>. Stripe publishes its webhook addresses at
+          <code>https://stripe.com/files/ips/ips_webhooks.txt</code>; keep the list in sync if you use
+          <code>providers.stripe.allowed_ips</code>.</li>
       </ul>
     </details>
 
@@ -712,7 +740,7 @@ docker run -d --name relay --restart unless-stopped \
       <li><strong>Switch the live URL,</strong> then watch the unrouted and exhausted metrics closely for the first day.</li>
     </ol>
     <p>The steps are the same for every provider. Use Flutterwave's <strong>test mode</strong> webhook settings or
-      Monnify's sandbox for step 4.</p>
+      Monnify's sandbox for step 4. For Stripe, use a test-mode endpoint, or <code>stripe listen</code>.</p>
 
     <!-- ───────────────────────────── Flutterwave -->
     <h2 id="flutterwave">Flutterwave</h2>
@@ -827,6 +855,64 @@ routes:
     <p>Deliveries carry <code>X-Relay-Provider: monnify</code>, and envelopes carry <code>"provider":"monnify"</code>.
       Check a transaction with Monnify's transaction query API before giving value.</p>
 
+    <!-- ───────────────────────────── Stripe -->
+    <h2 id="stripe">Stripe</h2>
+    <p>Relay handles Stripe webhooks the same way as the others: verify, find the owner, store, deliver. Stripe lets
+      you register several endpoints, but each one gets every subscribed event, so pointing each application at Stripe
+      directly would broadcast every payment to all of them. Register <strong>one</strong> endpoint, at Relay:</p>
+<pre><code>providers:
+  stripe:
+    webhook_secret_envs: [STRIPE_WEBHOOK_SECRET]
+    livemode: true                        # this Relay serves live events only
+    confirm_with_api: true                # recommended when several applications share the account
+    api_key_env: STRIPE_API_KEY           # restricted key with Events: read
+
+routes:
+  - application: app_a
+    match:
+      reference_prefix: "APPA_"      # matches client_reference_id or metadata.reference
+  - provider: stripe
+    application: app_b
+    match:
+      metadata:
+        app: "app_b"                 # a key you set in the object's metadata</code></pre>
+    <ol>
+      <li>In the Stripe Dashboard, go to <strong>Developers → Webhooks</strong> and add an endpoint at your Relay
+        address followed by <code>/webhooks/stripe</code>. Subscribe it to the routed events below; others are
+        accepted but only stored.</li>
+      <li>Put the endpoint's <strong>signing secret</strong> (<code>whsec_…</code>) in <code>STRIPE_WEBHOOK_SECRET</code>.
+        When you roll it, list the old and new secrets' variables in <code>webhook_secret_envs</code> until the old one
+        expires.</li>
+      <li>Tag each payment with its owner. On Checkout, set <code>client_reference_id</code>, and also
+        <code>payment_intent_data.metadata.reference</code> to the same value so the PaymentIntent's events route too.
+        On PaymentIntents, set <code>metadata.reference</code> or a marker key such as <code>metadata.app</code>.
+        Applications can also register a reference with
+        <code>{"provider":"stripe","type":"transaction_reference","value":"..."}</code>.</li>
+      <li>For <code>confirm_with_api</code>, create a <strong>restricted key</strong> with read access to
+        <strong>Events</strong> only. Relay refuses to start if its mode (<code>rk_test_</code>/<code>rk_live_</code>)
+        doesn't match <code>livemode</code>.</li>
+    </ol>
+    <table>
+      <tr><th></th><th>Stripe</th></tr>
+      <tr><td><strong>Signature</strong></td><td><code>Stripe-Signature: t=…,v1=…</code>: hex HMAC-SHA256 of <code>"&lt;t&gt;.&lt;body&gt;"</code>, keyed with the endpoint signing secret. Any <code>v1</code> under any configured secret is accepted. A timestamp more than <code>tolerance</code> (default 5 minutes) from now is rejected.</td></tr>
+      <tr><td><strong>Mode</strong></td><td><code>livemode</code> must match the event's <code>livemode</code>; a mismatch gets <code>401</code>. Run a separate Relay instance for test mode.</td></tr>
+      <tr><td><strong>Routed events</strong></td><td><code>checkout.session.completed</code>, <code>checkout.session.async_payment_succeeded</code>, <code>checkout.session.async_payment_failed</code>, <code>checkout.session.expired</code>, <code>payment_intent.succeeded</code>, <code>payment_intent.payment_failed</code>, <code>payment_intent.processing</code>, <code>payment_intent.canceled</code>. Charges, refunds, disputes, invoices and subscriptions are stored as <code>unsupported</code> for now.</td></tr>
+      <tr><td><strong>Reference</strong></td><td><code>client_reference_id</code> on a Checkout Session, otherwise <code>metadata.reference</code></td></tr>
+      <tr><td><strong>Metadata</strong></td><td><code>data.object.metadata</code></td></tr>
+      <tr><td><strong>Connect</strong></td><td>Events from connected accounts (top-level <code>account</code>) are stored as <code>unsupported</code> with type <code>connect.&lt;type&gt;</code>.</td></tr>
+      <tr><td><strong>Duplicates</strong></td><td>The event id (<code>evt_…</code>)</td></tr>
+      <tr><td><strong>Confirmation</strong></td><td>With <code>confirm_with_api</code>, Relay fetches <code>GET /v1/events/:id</code>. The type, <code>livemode</code>, and the object's id, reference, metadata, status, amounts and currency must match.</td></tr>
+      <tr><td><strong>Provider retries</strong></td><td>Up to 3 days with exponential backoff in live mode. You can also resend from the Dashboard.</td></tr>
+    </table>
+    <p><strong>Trying it locally:</strong> forward test-mode events with the Stripe CLI (set <code>livemode: false</code>
+      and the <code>whsec_…</code> secret it prints), or sign a sample event yourself:</p>
+<pre><code>stripe listen --forward-to localhost:8080/webhooks/stripe
+stripe trigger checkout.session.completed
+STRIPE_WEBHOOK_SECRET=whsec_your_secret examples/send-fixture.sh stripe testdata/stripe/checkout_session_completed.json</code></pre>
+    <p><code>testdata/stripe/MATRIX.md</code> lists the samples and what each one exercises.</p>
+    <p>Deliveries carry <code>X-Relay-Provider: stripe</code>, and envelopes carry <code>"provider":"stripe"</code>.
+      Retrieve the PaymentIntent or Checkout Session from Stripe before giving value.</p>
+
     <!-- ───────────────────────────── Go library -->
     <h2 id="go-library">Use Relay as a Go library</h2>
     <p><code>relay serve</code> is a thin wrapper around a Go package, so you can import Relay into your own program:</p>
@@ -847,7 +933,7 @@ _, routed, err := r.RegisterReference(ctx, "billing", "paystack", "ORDER_1001")<
       <tr><td><code>relay/config</code></td><td>Load <code>relay.yaml</code>, or build and <code>Validate</code> a configuration in Go</td></tr>
       <tr><td><code>relay/receiver</code></td><td>Verify Relay's deliveries in a Go application (<code>receiver.Handler</code>)</td></tr>
       <tr><td><code>relay/provider</code></td><td>The <code>Adapter</code> interface. Implement it and pass <code>relay.WithProvider</code> to add a payment provider.</td></tr>
-      <tr><td><code>relay/provider/paystack</code>, <code>relay/provider/flutterwave</code>, <code>relay/provider/monnify</code></td><td>The built-in adapters, also usable on their own</td></tr>
+      <tr><td><code>relay/provider/paystack</code>, <code>relay/provider/flutterwave</code>, <code>relay/provider/monnify</code>, <code>relay/provider/stripe</code></td><td>The built-in adapters, also usable on their own</td></tr>
     </table>
     <p>The full guide is in <a href="https://github.com/khaleelhabeeb/relay/blob/main/docs/library.md">docs/library.md</a>:
       embedding, configuration in Go, receiving deliveries, and writing a provider adapter. The API reference, with
@@ -893,6 +979,8 @@ _, routed, err := r.RegisterReference(ctx, "billing", "paystack", "ORDER_1001")<
       <li><strong>Paystack</strong> retries every 3 minutes for the first 4 tries, then hourly for 72 hours in live mode.</li>
       <li><strong>Flutterwave</strong> retries only 3 times, 30 minutes apart, and only if retries are enabled in its dashboard.</li>
       <li><strong>Monnify</strong> resends when it gets no <code>200</code> or times out, on a schedule it doesn't publish.</li>
+      <li><strong>Stripe</strong> retries with exponential backoff for up to 3 days in live mode (a few hours in test
+        mode), and lets you resend events from the Dashboard.</li>
     </ul>
     <p>Keep downtime short, especially with Flutterwave. Relay ignores anything that arrives twice.</p>
     <h3>What happens if my application is down?</h3>
@@ -910,6 +998,7 @@ _, routed, err := r.RegisterReference(ctx, "billing", "paystack", "ORDER_1001")<
         recognised even if its bytes differ.</li>
       <li><strong>Flutterwave:</strong> by <code>event:data.id:data.status</code>, as Flutterwave recommends.</li>
       <li><strong>Monnify:</strong> by <code>eventType:transactionReference:paymentStatus</code>.</li>
+      <li><strong>Stripe:</strong> by the event id (<code>evt_…</code>), which Stripe keeps across retries.</li>
       <li><strong>Anything else:</strong> by a SHA-256 hash of the exact body.</li>
     </ul>
 
@@ -927,7 +1016,7 @@ make bench    # throughput and latency on this machine</code></pre>
       <tr><td><code>.</code> (package <code>relay</code>)</td><td>The embeddable library; <code>relay serve</code> runs it</td></tr>
       <tr><td><code>config</code></td><td>Configuration loading and validation (public)</td></tr>
       <tr><td><code>provider</code></td><td>Provider-neutral event model and the <code>Adapter</code> interface (public)</td></tr>
-      <tr><td><code>provider/paystack</code>, <code>provider/flutterwave</code>, <code>provider/monnify</code></td><td>Built-in provider adapters (public)</td></tr>
+      <tr><td><code>provider/paystack</code>, <code>provider/flutterwave</code>, <code>provider/monnify</code>, <code>provider/stripe</code></td><td>Built-in provider adapters (public)</td></tr>
       <tr><td><code>receiver</code></td><td>Verifying Relay's deliveries in Go (public)</td></tr>
       <tr><td><code>cmd/relay</code></td><td>Entry point</td></tr>
       <tr><td><code>internal/routing</code></td><td>Ownership decisions (pure, no I/O)</td></tr>

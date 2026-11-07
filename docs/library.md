@@ -23,7 +23,7 @@ go get github.com/khaleelhabeeb/relay@latest
 | [`relay/config`](#configuration-in-go) | Load `relay.yaml`, or build and validate a configuration in Go |
 | [`relay/receiver`](#receiving-deliveries-in-go) | Verify Relay's signed deliveries in a Go application |
 | [`relay/provider`](#adding-a-payment-provider) | The `Adapter` interface for adding a payment provider |
-| `relay/provider/paystack`, `relay/provider/flutterwave`, `relay/provider/monnify` | The built-in adapters. You can also use them on their own to verify and parse those providers' webhooks. |
+| `relay/provider/paystack`, `relay/provider/flutterwave`, `relay/provider/monnify`, `relay/provider/stripe` | The built-in adapters. You can also use them on their own to verify and parse those providers' webhooks. |
 
 > **Stability:** the API is pre-1.0. It may change between minor versions until 1.0, and every
 > change is recorded in [CHANGELOG.md](../CHANGELOG.md). Everything under `internal/` is private
@@ -167,7 +167,7 @@ type Adapter interface {
 
 Pass it to `relay.New` with `relay.WithProvider(myAdapter{...})`. If your YAML routes name the
 provider (`provider: acme`), tell the loader it exists: `config.LoadFile("relay.yaml", "acme")`.
-An adapter named after a built-in (`paystack`, `flutterwave`, `monnify`) replaces that built-in.
+An adapter named after a built-in (`paystack`, `flutterwave`, `monnify`, `stripe`) replaces that built-in.
 
 Guidelines:
 
@@ -188,7 +188,7 @@ Guidelines:
 - **Optionally,** implement `provider.Hinter` to give operators a provider-specific reason when an
   event can't be routed.
 
-`provider/paystack`, `provider/flutterwave` and `provider/monnify` are complete examples. `relay_test.go` contains a
+`provider/paystack`, `provider/flutterwave`, `provider/monnify` and `provider/stripe` are complete examples. `relay_test.go` contains a
 small custom adapter with an end-to-end test.
 
 ## The `relay` CLI with an embedded Relay
