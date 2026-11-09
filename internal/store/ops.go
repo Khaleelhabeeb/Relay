@@ -11,10 +11,11 @@ import (
 
 // EventFilter narrows ListEvents. Zero values mean "any".
 type EventFilter struct {
-	Status    string
-	EventType string
-	Since     time.Time
-	Limit     int
+	Status       string
+	Confirmation string
+	EventType    string
+	Since        time.Time
+	Limit        int
 }
 
 // EventSummary is an event without its payload.
@@ -27,6 +28,7 @@ type EventSummary struct {
 	ReceivedAt     time.Time `json:"received_at"`
 	DuplicateCount int       `json:"duplicate_count"`
 	PayloadBytes   int       `json:"payload_bytes"`
+	Confirmation   string    `json:"confirmation"`
 }
 
 // ListEvents returns events, newest first.
@@ -38,6 +40,9 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]EventSummary, 
 	if f.Status != "" {
 		where, args = append(where, "routing_status = ?"), append(args, f.Status)
 	}
+	if f.Confirmation != "" {
+		where, args = append(where, "confirmation = ?"), append(args, f.Confirmation)
+	}
 	if f.EventType != "" {
 		where, args = append(where, "event_type = ?"), append(args, f.EventType)
 	}
@@ -45,7 +50,7 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]EventSummary, 
 		where, args = append(where, "received_at >= ?"), append(args, ms(f.Since))
 	}
 	q := `SELECT id, event_type, routing_status, application_id, reference, received_at, duplicate_count,
-		COALESCE(LENGTH(raw_payload), 0) FROM events`
+		COALESCE(LENGTH(raw_payload), 0), confirmation FROM events`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ") //nolint:gosec // where holds only constant "col = ?" fragments
 	}
@@ -64,7 +69,7 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]EventSummary, 
 			app, ref sql.NullString
 			received int64
 		)
-		if err := rows.Scan(&e.ID, &e.EventType, &e.RoutingStatus, &app, &ref, &received, &e.DuplicateCount, &e.PayloadBytes); err != nil {
+		if err := rows.Scan(&e.ID, &e.EventType, &e.RoutingStatus, &app, &ref, &received, &e.DuplicateCount, &e.PayloadBytes, &e.Confirmation); err != nil {
 			return nil, err
 		}
 		e.ApplicationID, e.Reference, e.ReceivedAt = app.String, ref.String, fromMS(received)
@@ -168,8 +173,9 @@ type PurgeResult struct {
 }
 
 // Purge applies the retention policy. Raw payloads are cleared
-// for unsupported events received before payloadCutoff and for matched
-// events whose deliveries were all delivered before it. Unresolved,
+// for unsupported events and events the provider API rejected received
+// before payloadCutoff, and for matched events whose deliveries were all
+// delivered before it. Unresolved,
 // ambiguous, pending and exhausted events keep their payloads. Finished
 // attempt rows older than attemptCutoff are deleted.
 func (s *Store) Purge(ctx context.Context, payloadCutoff, attemptCutoff time.Time) (PurgeResult, error) {
@@ -178,11 +184,12 @@ func (s *Store) Purge(ctx context.Context, payloadCutoff, attemptCutoff time.Tim
 		res, err := tx.ExecContext(ctx, `UPDATE events SET raw_payload = NULL
 			WHERE raw_payload IS NOT NULL AND (
 				(routing_status = 'unsupported' AND received_at < ?)
+				OR (confirmation = 'rejected' AND received_at < ?)
 				OR (routing_status = 'matched'
 					AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = events.id
 						AND (d.status != 'delivered' OR d.delivered_at >= ?))
 					AND EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = events.id)))`,
-			ms(payloadCutoff), ms(payloadCutoff))
+			ms(payloadCutoff), ms(payloadCutoff), ms(payloadCutoff))
 		if err != nil {
 			return err
 		}
@@ -206,12 +213,13 @@ func (s *Store) Purge(ctx context.Context, payloadCutoff, attemptCutoff time.Tim
 type Stats struct {
 	DeliveriesByStatus map[string]int64
 	EventsByStatus     map[string]int64
-	OldestPendingAge   time.Duration // 0 if none pending
+	OldestPendingAge   time.Duration    // 0 if none pending
+	Confirmations      map[string]int64 // events pending or failed API confirmation
 }
 
 // Stats reads current queue and routing gauges.
 func (s *Store) Stats(ctx context.Context, now time.Time) (Stats, error) {
-	st := Stats{DeliveriesByStatus: map[string]int64{}, EventsByStatus: map[string]int64{}}
+	st := Stats{DeliveriesByStatus: map[string]int64{}, EventsByStatus: map[string]int64{}, Confirmations: map[string]int64{}}
 	count := func(q string, into map[string]int64) error {
 		rows, err := s.r.QueryContext(ctx, q)
 		if err != nil {
@@ -232,6 +240,9 @@ func (s *Store) Stats(ctx context.Context, now time.Time) (Stats, error) {
 		return st, err
 	}
 	if err := count(`SELECT routing_status, COUNT(*) FROM events WHERE routing_status IN ('unresolved', 'ambiguous') GROUP BY routing_status`, st.EventsByStatus); err != nil {
+		return st, err
+	}
+	if err := count(`SELECT confirmation, COUNT(*) FROM events WHERE confirmation IN ('pending', 'failed') GROUP BY confirmation`, st.Confirmations); err != nil {
 		return st, err
 	}
 	var oldest sql.NullInt64
@@ -255,7 +266,7 @@ func limitOr(n, def int) int {
 // after since (zero: any time), oldest first.
 func (s *Store) EventIDsByStatus(ctx context.Context, status string, since time.Time) ([]string, error) {
 	rows, err := s.r.QueryContext(ctx, `SELECT id FROM events WHERE routing_status = ? AND received_at >= ?
-		ORDER BY received_at`, status, ms(since))
+		AND confirmation != 'rejected' ORDER BY received_at`, status, ms(since))
 	if err != nil {
 		return nil, err
 	}

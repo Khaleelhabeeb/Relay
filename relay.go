@@ -17,7 +17,7 @@
 //	defer r.Close()
 //
 //	mux.Handle("/webhooks/", r.WebhookHandler()) // in your own server
-//	go r.Run(ctx)                                // delivery and retention workers
+//	go r.Run(ctx)                                // delivery, confirmation and retention workers
 //
 // or let Relay serve the listeners in cfg.Server itself with ListenAndServe.
 //
@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/khaleelhabeeb/relay/config"
+	"github.com/khaleelhabeeb/relay/internal/confirm"
 	"github.com/khaleelhabeeb/relay/internal/delivery"
 	"github.com/khaleelhabeeb/relay/internal/ingest"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
@@ -109,6 +110,7 @@ type Relay struct {
 	registration *registration.Handler
 	dispatcher   *delivery.Dispatcher
 	purger       *retention.Purger
+	confirmer    *confirm.Worker
 	running      atomic.Bool
 }
 
@@ -161,7 +163,10 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Relay, error
 	dispatcher := delivery.NewDispatcher(cfg, st, logger, o.userAgent)
 	dispatcher.Metrics = m
 	engine := routing.NewEngine(routing.RulesFromConfig(cfg.Routes), adapters...).WithNamespaces(routing.NamespacesFromConfig(cfg.Applications))
-	acceptor := &ingest.StoreAcceptor{Store: st, Engine: engine, Logger: logger, Metrics: m, OnRouted: dispatcher.Nudge}
+	confirmer := confirm.New(st, adapters, logger, m)
+	confirmer.OnDelivery = dispatcher.Nudge
+	acceptor := &ingest.StoreAcceptor{Store: st, Engine: engine, Logger: logger, Metrics: m,
+		OnRouted: dispatcher.Nudge, OnPending: confirmer.Nudge}
 	reprocessor := &reprocess.Reprocessor{Store: st, Engine: engine, Logger: logger, Metrics: m, OnRouted: dispatcher.Nudge}
 	reg := registration.NewHandler(cfg, st, reprocessor, logger)
 	deps := server.Deps{
@@ -185,6 +190,7 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Relay, error
 		webhooks:     server.Webhooks(cfg, logger, deps),
 		registration: reg,
 		dispatcher:   dispatcher,
+		confirmer:    confirmer,
 		purger: &retention.Purger{Store: st, PayloadDays: cfg.Retention.PayloadDays,
 			AttemptDays: cfg.Retention.AttemptDays, Logger: logger},
 	}, nil
@@ -288,14 +294,15 @@ func (r *Relay) WebhookHandler() http.Handler { return r.webhooks }
 // their registration tokens. Mount it on a private listener.
 func (r *Relay) APIHandler() http.Handler { return r.registration }
 
-// Run delivers stored events and applies retention until ctx is cancelled.
+// Run delivers stored events, finishes provider API confirmations that
+// failed at ingest, and applies retention until ctx is cancelled.
 // Webhooks are accepted and stored without it, but nothing is delivered
 // until it runs. It returns ErrRunning if already running.
 func (r *Relay) Run(ctx context.Context) error {
 	if !r.running.CompareAndSwap(false, true) {
 		return ErrRunning
 	}
-	return runAll(ctx, r.dispatcher.Run, r.purger.Run)
+	return runAll(ctx, r.dispatcher.Run, r.confirmer.Run, r.purger.Run)
 }
 
 // ListenAndServe runs the workers and serves cfg.Server.Listen (and
@@ -304,7 +311,7 @@ func (r *Relay) ListenAndServe(ctx context.Context) error {
 	if !r.running.CompareAndSwap(false, true) {
 		return ErrRunning
 	}
-	return runAll(ctx, r.server.Run, r.dispatcher.Run, r.purger.Run)
+	return runAll(ctx, r.server.Run, r.dispatcher.Run, r.confirmer.Run, r.purger.Run)
 }
 
 // runAll runs fns with a shared context; when one returns, the rest stop.

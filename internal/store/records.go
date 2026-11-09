@@ -27,6 +27,10 @@ type Event struct {
 	DuplicateCount   int             `json:"duplicate_count"`
 	RoutingStatus    routing.Outcome `json:"routing_status"`
 	ApplicationID    string          `json:"application_id"`
+	Confirmation     Confirmation    `json:"confirmation"`
+	ConfirmAttempts  int             `json:"confirm_attempts"`
+	ConfirmNextAt    time.Time       `json:"confirm_next_at,omitzero"`
+	ConfirmError     string          `json:"confirm_error,omitempty"`
 }
 
 type RoutingDecision struct {
@@ -88,6 +92,8 @@ type StoredIdentity struct {
 	ID               string
 	Reference        string
 	DedicatedAccount string
+	PayloadSHA256    string
+	Confirmation     Confirmation
 }
 
 // IdentityByDedupKey returns the already-stored event with key, if any.
@@ -96,8 +102,9 @@ func (t *Tx) IdentityByDedupKey(ctx context.Context, provider, key string) (Stor
 		s        StoredIdentity
 		ref, dva sql.NullString
 	)
-	err := t.tx.QueryRowContext(ctx, `SELECT id, reference, dedicated_account FROM events WHERE provider = ? AND dedup_key = ?`,
-		provider, key).Scan(&s.ID, &ref, &dva)
+	err := t.tx.QueryRowContext(ctx, `SELECT id, reference, dedicated_account, payload_sha256, confirmation
+		FROM events WHERE provider = ? AND dedup_key = ?`,
+		provider, key).Scan(&s.ID, &ref, &dva, &s.PayloadSHA256, &s.Confirmation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StoredIdentity{}, false, nil
 	}
@@ -158,13 +165,23 @@ func (t *Tx) RecordDuplicate(ctx context.Context, eventID string, seenAt time.Ti
 }
 
 func (t *Tx) InsertEvent(ctx context.Context, e *Event) error {
+	conf := e.Confirmation
+	if conf == "" {
+		conf = ConfirmNone
+	}
+	var next sql.NullInt64
+	if !e.ConfirmNextAt.IsZero() {
+		next = sql.NullInt64{Int64: ms(e.ConfirmNextAt), Valid: true}
+	}
 	_, err := t.tx.ExecContext(ctx, `INSERT INTO events
 		(id, provider, event_type, dedup_key, raw_payload, payload_sha256, reference, dedicated_account,
-		 received_at, last_seen_at, routing_status, application_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 received_at, last_seen_at, routing_status, application_id,
+		 confirmation, confirm_attempts, confirm_next_at, confirm_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, e.Provider, e.EventType, e.DedupKey, e.RawPayload, e.PayloadSHA256,
 		nullString(e.Reference), nullString(e.DedicatedAccount),
-		ms(e.ReceivedAt), ms(e.ReceivedAt), string(e.RoutingStatus), nullString(e.ApplicationID))
+		ms(e.ReceivedAt), ms(e.ReceivedAt), string(e.RoutingStatus), nullString(e.ApplicationID),
+		string(conf), e.ConfirmAttempts, next, nullString(truncate(e.ConfirmError, 500)))
 	return err
 }
 
@@ -231,17 +248,20 @@ func (l txLookup) Registrations(ctx context.Context, identifierType, value strin
 }
 
 const eventColumns = `id, provider, event_type, dedup_key, raw_payload, payload_sha256,
-	reference, dedicated_account, received_at, last_seen_at, duplicate_count, routing_status, application_id`
+	reference, dedicated_account, received_at, last_seen_at, duplicate_count, routing_status, application_id,
+	confirmation, confirm_attempts, confirm_next_at, confirm_error`
 
 func scanEvent(row interface{ Scan(...any) error }) (*Event, error) {
 	var (
-		e                  Event
-		ref, dva, app      sql.NullString
-		received, lastSeen int64
-		status             string
+		e                   Event
+		ref, dva, app, cerr sql.NullString
+		received, lastSeen  int64
+		next                sql.NullInt64
+		status              string
 	)
 	err := row.Scan(&e.ID, &e.Provider, &e.EventType, &e.DedupKey, &e.RawPayload, &e.PayloadSHA256,
-		&ref, &dva, &received, &lastSeen, &e.DuplicateCount, &status, &app)
+		&ref, &dva, &received, &lastSeen, &e.DuplicateCount, &status, &app,
+		&e.Confirmation, &e.ConfirmAttempts, &next, &cerr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -251,6 +271,10 @@ func scanEvent(row interface{ Scan(...any) error }) (*Event, error) {
 	e.Reference, e.DedicatedAccount, e.ApplicationID = ref.String, dva.String, app.String
 	e.ReceivedAt, e.LastSeenAt = fromMS(received), fromMS(lastSeen)
 	e.RoutingStatus = routing.Outcome(status)
+	e.ConfirmError = cerr.String
+	if next.Valid {
+		e.ConfirmNextAt = fromMS(next.Int64)
+	}
 	return &e, nil
 }
 

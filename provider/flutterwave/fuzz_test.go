@@ -31,6 +31,8 @@ func FuzzParseAndExtract(f *testing.F) {
 		`{"event":"x","data":{"meta":[1,2],"tx_ref":{"a":1},"id":1e400,"status":null}}`,
 		`{"event":"transfer.completed","data":{"reference":"R","status":"SUCCESSFUL","id":3}}`,
 		`{"event":"x","data":{},"meta_data":"\"nested\""}`,
+		`{"id":1,"txRef":"APPA_1","status":"successful","amount":100,"currency":"NGN","event.type":"CARD_TRANSACTION"}`,
+		`{"event.type":"Transfer","transfer":{"id":5,"reference":"R"}}`,
 	} {
 		f.Add([]byte(s))
 	}

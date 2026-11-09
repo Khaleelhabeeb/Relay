@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -262,4 +263,52 @@ func TestHandlerServesBuiltInsAndHealth(t *testing.T) {
 		t.Fatalf("paystack: %v %v", resp, err)
 	}
 	resp.Body.Close()
+}
+
+// confirmingAcme is acme with a provider API check that fails (as if the
+// API timed out) a set number of times before vouching for the event.
+type confirmingAcme struct {
+	acme
+	outages *atomic.Int32
+}
+
+func (c confirmingAcme) Confirm(context.Context, *provider.Event, provider.Identifiers) error {
+	if c.outages.Add(-1) >= 0 {
+		return errors.New("acme API: context deadline exceeded")
+	}
+	return nil
+}
+
+// An event whose API check fails at ingest is acknowledged, held, confirmed
+// in the background and then delivered.
+func TestEmbeddedConfirmationRetriedInBackground(t *testing.T) {
+	a := newInbox()
+	appA := httptest.NewServer(receiver.Handler(secretA, a.handle))
+	defer appA.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	outages := &atomic.Int32{}
+	outages.Store(1) // the ingest check fails; the first background retry succeeds
+	r, err := relay.New(ctx, testConfig(t, appA.URL, "http://127.0.0.1:2"),
+		relay.WithProvider(confirmingAcme{acme: acme{token: acmeToken}, outages: outages}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	srv := httptest.NewServer(r.WebhookHandler())
+	defer srv.Close()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	body := `{"type":"payment.succeeded","id":"9","ref":"APPA_9"}`
+	if c := post(t, srv.URL+"/webhooks/acme", acmeToken, body); c != http.StatusOK {
+		t.Fatalf("webhook during API outage: %d, want 200", c)
+	}
+	if d := a.wait(t); string(d.Body) != body {
+		t.Fatalf("delivery %q", d.Body)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 }

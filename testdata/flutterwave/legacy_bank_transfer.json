@@ -1,0 +1,36 @@
+{
+  "id": 1000001,
+  "txRef": "APPA_LEGACY_1001",
+  "flwRef": "FLW-MOCK-legacy-1001",
+  "orderRef": "URF_0000000000000_0000001",
+  "paymentPlan": null,
+  "paymentPage": null,
+  "createdAt": "2026-11-07T14:41:16.000Z",
+  "amount": 100,
+  "charged_amount": 100,
+  "status": "successful",
+  "IP": "203.0.113.10",
+  "currency": "NGN",
+  "appfee": 1.4,
+  "merchantfee": 0,
+  "merchantbearsfee": 1,
+  "charge_type": "normal",
+  "customer": {
+    "id": 2000001,
+    "phone": "08000000000",
+    "fullName": "Test Customer",
+    "customertoken": null,
+    "email": "customer@example.com",
+    "createdAt": "2026-04-26T16:23:37.000Z",
+    "updatedAt": "2026-04-26T16:23:37.000Z",
+    "deletedAt": null,
+    "AccountId": 3000001
+  },
+  "entity": {
+    "account_number": "0000000000",
+    "first_name": "DOE",
+    "last_name": "JOHN",
+    "createdAt": "2026-11-07T14:41:13.000Z"
+  },
+  "event.type": "BANK_TRANSFER_TRANSACTION"
+}

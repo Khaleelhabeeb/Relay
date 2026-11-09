@@ -19,7 +19,8 @@ import (
 func newEventsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "events", Short: "Inspect and act on received events"}
 	addConfigFlag(cmd)
-	cmd.AddCommand(newEventsListCmd(), newEventsInspectCmd(), newEventsReprocessCmd(), newEventsRerouteCmd())
+	cmd.AddCommand(newEventsListCmd(), newEventsInspectCmd(), newEventsReprocessCmd(), newEventsRerouteCmd(),
+		newEventsConfirmCmd())
 	return cmd
 }
 
@@ -47,16 +48,21 @@ func newEventsListCmd() *cobra.Command {
 				}
 				return env.json(events)
 			}
-			env.table("ID\tRECEIVED\tTYPE\tSTATUS\tAPPLICATION\tREFERENCE\tDUPLICATES", func(w io.Writer) {
+			env.table("ID\tRECEIVED\tTYPE\tSTATUS\tAPPLICATION\tREFERENCE\tDUPLICATES\tCONFIRMATION", func(w io.Writer) {
 				for _, e := range events {
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", e.ID, ts(e.ReceivedAt), e.EventType, e.RoutingStatus,
-						dash(e.ApplicationID), dash(e.Reference), e.DuplicateCount)
+					conf := e.Confirmation
+					if conf == string(store.ConfirmNone) {
+						conf = ""
+					}
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", e.ID, ts(e.ReceivedAt), e.EventType, e.RoutingStatus,
+						dash(e.ApplicationID), dash(e.Reference), e.DuplicateCount, dash(conf))
 				}
 			})
 			return nil
 		}),
 	}
 	cmd.Flags().StringVar(&f.Status, "status", "", "routing status: matched, unresolved, ambiguous, unsupported")
+	cmd.Flags().StringVar(&f.Confirmation, "confirmation", "", "provider API confirmation: pending, failed, rejected, confirmed, none")
 	cmd.Flags().StringVar(&f.EventType, "type", "", "event type, e.g. charge.success")
 	cmd.Flags().DurationVar(&since, "since", 0, "only events received within this duration, e.g. 24h")
 	cmd.Flags().IntVar(&f.Limit, "limit", 50, "maximum rows")
@@ -106,6 +112,8 @@ func newEventsInspectCmd() *cobra.Command {
 					"application": e.ApplicationID, "reference": e.Reference, "dedicated_account": e.DedicatedAccount,
 					"received_at": e.ReceivedAt, "last_seen_at": e.LastSeenAt, "duplicate_count": e.DuplicateCount,
 					"payload_bytes": len(e.RawPayload), "payload_sha256": e.PayloadSHA256,
+					"confirmation": e.Confirmation, "confirm_attempts": e.ConfirmAttempts,
+					"confirm_next_at": e.ConfirmNextAt, "confirm_error": e.ConfirmError,
 					"routing_decisions": decisions, "deliveries": deliveries, "attempts": attempts,
 					"dedup_conflicts": conflicts,
 				}
@@ -125,6 +133,18 @@ func newEventsInspectCmd() *cobra.Command {
 				fmt.Fprintf(w, "DVA          %s\n", e.DedicatedAccount)
 			}
 			fmt.Fprintf(w, "Dedup key    %s\n", e.DedupKey)
+			switch e.Confirmation {
+			case store.ConfirmPending:
+				fmt.Fprintf(w, "Confirmation pending: not delivered yet (attempts: %d, next: %s, last error: %s)\n",
+					e.ConfirmAttempts, ts(e.ConfirmNextAt), dash(e.ConfirmError))
+			case store.ConfirmFailed:
+				fmt.Fprintf(w, "Confirmation failed: not delivered (attempts: %d, last error: %s); retry with `relay events confirm %s`\n",
+					e.ConfirmAttempts, dash(e.ConfirmError), e.ID)
+			case store.ConfirmRejected:
+				fmt.Fprintf(w, "Confirmation rejected by the provider API: never delivered (%s)\n", dash(e.ConfirmError))
+			case store.ConfirmConfirmed:
+				fmt.Fprintf(w, "Confirmation confirmed by the provider API\n")
+			}
 			fmt.Fprintf(w, "Received     %s (seen again %d times, last %s)\n", ts(e.ReceivedAt), e.DuplicateCount, ts(e.LastSeenAt))
 			if e.RawPayload == nil {
 				fmt.Fprintf(w, "Payload      purged by retention (sha256 %s)\n", e.PayloadSHA256)
@@ -251,7 +271,11 @@ func newEventsRerouteCmd() *cobra.Command {
 				}
 				return err
 			}
-			fmt.Fprintf(env.out, "%s rerouted to %s; delivery queued\n", args[0], application)
+			msg := "delivery queued"
+			if e, err := env.store.GetEvent(ctx, args[0]); err == nil && !e.Confirmation.Deliverable() {
+				msg = "delivery waits for provider API confirmation"
+			}
+			fmt.Fprintf(env.out, "%s rerouted to %s; %s\n", args[0], application, msg)
 			return nil
 		}),
 	}
@@ -260,4 +284,31 @@ func newEventsRerouteCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("application")
 	_ = cmd.MarkFlagRequired("reason")
 	return cmd
+}
+
+func newEventsConfirmCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "confirm <event-id>...",
+		Short: "Retry provider API confirmation now for pending or failed events",
+		Long: "Retry provider API confirmation now for events whose check against the provider's API\n" +
+			"failed (confirmation pending or failed). The running relay serve picks them up within\n" +
+			"seconds and delivers each one once the provider confirms it; one the provider disowns is\n" +
+			"rejected and never delivered. Find them with: relay events list --confirmation failed",
+		Args: cobra.MinimumNArgs(1),
+		RunE: withTool(func(ctx context.Context, env *toolEnv, args []string) error {
+			var errs []error
+			for _, id := range args {
+				err := env.store.RetryConfirmation(ctx, id, time.Now())
+				switch {
+				case errors.Is(err, store.ErrNotFound):
+					errs = append(errs, fmt.Errorf("event %s not found", id))
+				case err != nil:
+					errs = append(errs, fmt.Errorf("%s: %w", id, err))
+				default:
+					fmt.Fprintf(env.out, "%s: confirmation queued\n", id)
+				}
+			}
+			return errors.Join(errs...)
+		}),
+	}
 }

@@ -91,6 +91,14 @@ func TestPurge(t *testing.T) {
 	seed(t, s, "evt_unsupported_old", routing.Unsupported, old, nil)
 	seed(t, s, "evt_unsupported_new", routing.Unsupported, recent, nil)
 	seed(t, s, "evt_unresolved_old", routing.Unresolved, old, nil)
+	seed(t, s, "evt_rejected_old", routing.Matched, old, nil)
+	seed(t, s, "evt_pending_old", routing.Matched, old, nil)
+	if _, err := s.w.Exec(`UPDATE events SET confirmation='rejected' WHERE id='evt_rejected_old'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.w.Exec(`UPDATE events SET confirmation='pending', confirm_next_at=0 WHERE id='evt_pending_old'`); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := s.w.Exec(`UPDATE deliveries SET status='delivered', delivered_at=? WHERE id='del_a'`, ms(old)); err != nil {
 		t.Fatal(err)
@@ -111,11 +119,11 @@ func TestPurge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.PayloadsCleared != 2 || res.AttemptsDeleted != 1 {
-		t.Fatalf("purge = %+v, want 2 payloads, 1 attempt", res)
+	if res.PayloadsCleared != 3 || res.AttemptsDeleted != 1 {
+		t.Fatalf("purge = %+v, want 3 payloads, 1 attempt", res)
 	}
 	for id, wantPayload := range map[string]bool{
-		"evt_old_delivered": false, "evt_unsupported_old": false,
+		"evt_old_delivered": false, "evt_unsupported_old": false, "evt_rejected_old": false, "evt_pending_old": true,
 		"evt_recent_delivered": true, "evt_exhausted": true, "evt_unsupported_new": true, "evt_unresolved_old": true,
 	} {
 		e, err := s.GetEvent(ctx, id)

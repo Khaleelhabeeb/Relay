@@ -22,6 +22,7 @@ type Metrics struct {
 	attempts        *prometheus.CounterVec
 	attemptDuration prometheus.Histogram
 	exhausted       *prometheus.CounterVec
+	confirmations   *prometheus.CounterVec
 }
 
 // New registers Relay's metrics. st, if non-nil, backs scrape-time gauges
@@ -31,7 +32,7 @@ func New(st *store.Store) *Metrics {
 		registry: prometheus.NewRegistry(),
 		webhooks: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "relay_webhooks_received_total",
-			Help: "Inbound webhooks by provider and result (accepted, duplicate, invalid_signature, invalid_payload, payload_too_large, storage_error, server_busy, forbidden_source).",
+			Help: "Inbound webhooks by provider and result (accepted, duplicate, dedup_conflict, invalid_signature, invalid_payload, payload_too_large, not_confirmed, confirm_pending, storage_error, server_busy, forbidden_source).",
 		}, []string{"provider", "result"}),
 		acceptLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "relay_webhook_accept_duration_seconds",
@@ -55,8 +56,12 @@ func New(st *store.Store) *Metrics {
 			Name: "relay_deliveries_exhausted_total",
 			Help: "Deliveries that used their whole retry budget and need operator replay.",
 		}, []string{"application"}),
+		confirmations: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "relay_confirmations_total",
+			Help: "Provider API confirmations finished in the background, by provider and result (deferred: the API failed at ingest and the event waits; confirmed; rejected; retry; failed: retry budget spent).",
+		}, []string{"provider", "result"}),
 	}
-	m.registry.MustRegister(m.webhooks, m.acceptLatency, m.routed, m.attempts, m.attemptDuration, m.exhausted,
+	m.registry.MustRegister(m.webhooks, m.acceptLatency, m.routed, m.attempts, m.attemptDuration, m.exhausted, m.confirmations,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	if st != nil {
 		m.registry.MustRegister(&storeCollector{store: st})
@@ -87,6 +92,13 @@ func (m *Metrics) Routed(outcome string) {
 	}
 }
 
+// Confirmation counts a provider API confirmation result.
+func (m *Metrics) Confirmation(provider, result string) {
+	if m != nil {
+		m.confirmations.WithLabelValues(provider, result).Inc()
+	}
+}
+
 // Attempt records a delivery attempt; errorCode "" means success.
 func (m *Metrics) Attempt(application, errorCode string, d time.Duration, exhausted bool) {
 	if m == nil {
@@ -113,6 +125,7 @@ var (
 	descUnrouted   = prometheus.NewDesc("relay_events_unrouted", "Events needing operator attention, by routing status.", []string{"status"}, nil)
 	descOldest     = prometheus.NewDesc("relay_oldest_pending_delivery_age_seconds", "Age of the oldest pending or in-flight delivery (0 if none).", nil, nil)
 	descStoreUp    = prometheus.NewDesc("relay_store_up", "1 if the database gauges could be read.", nil, nil)
+	descConfirm    = prometheus.NewDesc("relay_events_awaiting_confirmation", "Events not delivered because provider API confirmation is pending (retrying) or failed (needs relay events confirm).", []string{"state"}, nil)
 )
 
 func (c *storeCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -120,6 +133,7 @@ func (c *storeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descUnrouted
 	ch <- descOldest
 	ch <- descStoreUp
+	ch <- descConfirm
 }
 
 func (c *storeCollector) Collect(ch chan<- prometheus.Metric) {
@@ -138,4 +152,7 @@ func (c *storeCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(descUnrouted, prometheus.GaugeValue, float64(st.EventsByStatus[s]), s)
 	}
 	ch <- prometheus.MustNewConstMetric(descOldest, prometheus.GaugeValue, st.OldestPendingAge.Seconds())
+	for _, s := range []string{"pending", "failed"} {
+		ch <- prometheus.MustNewConstMetric(descConfirm, prometheus.GaugeValue, float64(st.Confirmations[s]), s)
+	}
 }
