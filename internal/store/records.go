@@ -31,6 +31,9 @@ type Event struct {
 	ConfirmAttempts  int             `json:"confirm_attempts"`
 	ConfirmNextAt    time.Time       `json:"confirm_next_at,omitzero"`
 	ConfirmError     string          `json:"confirm_error,omitempty"`
+	DismissedAt      time.Time       `json:"dismissed_at,omitzero"`
+	DismissedBy      string          `json:"dismissed_by,omitempty"`
+	DismissReason    string          `json:"dismiss_reason,omitempty"`
 }
 
 type RoutingDecision struct {
@@ -130,7 +133,10 @@ func (t *Tx) RecordDedupConflict(ctx context.Context, c *DedupConflict) error {
 		(id, event_id, reference, dedicated_account, raw_payload, payload_sha256, received_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		c.ID, c.EventID, nullString(c.Reference), nullString(c.DedicatedAccount), c.RawPayload, c.PayloadSHA256, ms(c.ReceivedAt))
-	return err
+	if err != nil {
+		return err
+	}
+	return queueAlert(ctx, t.tx, AlertDedupConflict, c.EventID, "", c.ReceivedAt)
 }
 
 // DedupConflictsForEvent lists an event's conflicting duplicates, oldest first.
@@ -249,19 +255,20 @@ func (l txLookup) Registrations(ctx context.Context, identifierType, value strin
 
 const eventColumns = `id, provider, event_type, dedup_key, raw_payload, payload_sha256,
 	reference, dedicated_account, received_at, last_seen_at, duplicate_count, routing_status, application_id,
-	confirmation, confirm_attempts, confirm_next_at, confirm_error`
+	confirmation, confirm_attempts, confirm_next_at, confirm_error, dismissed_at, dismissed_by, dismiss_reason`
 
 func scanEvent(row interface{ Scan(...any) error }) (*Event, error) {
 	var (
 		e                   Event
 		ref, dva, app, cerr sql.NullString
+		dby, dwhy           sql.NullString
 		received, lastSeen  int64
-		next                sql.NullInt64
+		next, dismissed     sql.NullInt64
 		status              string
 	)
 	err := row.Scan(&e.ID, &e.Provider, &e.EventType, &e.DedupKey, &e.RawPayload, &e.PayloadSHA256,
 		&ref, &dva, &received, &lastSeen, &e.DuplicateCount, &status, &app,
-		&e.Confirmation, &e.ConfirmAttempts, &next, &cerr)
+		&e.Confirmation, &e.ConfirmAttempts, &next, &cerr, &dismissed, &dby, &dwhy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -275,6 +282,10 @@ func scanEvent(row interface{ Scan(...any) error }) (*Event, error) {
 	if next.Valid {
 		e.ConfirmNextAt = fromMS(next.Int64)
 	}
+	if dismissed.Valid {
+		e.DismissedAt = fromMS(dismissed.Int64)
+	}
+	e.DismissedBy, e.DismissReason = dby.String, dwhy.String
 	return &e, nil
 }
 

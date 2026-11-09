@@ -6,13 +6,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
+	"slices"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/khaleelhabeeb/relay/config"
+	"github.com/khaleelhabeeb/relay/internal/ops"
+	"github.com/khaleelhabeeb/relay/internal/reprocess"
+	"github.com/khaleelhabeeb/relay/internal/routing"
 	"github.com/khaleelhabeeb/relay/internal/store"
 )
 
@@ -21,6 +26,7 @@ import (
 type toolEnv struct {
 	cfg   *config.Config
 	store *store.Store
+	ops   *ops.Service
 	out   io.Writer
 }
 
@@ -38,7 +44,15 @@ func openTool(cmd *cobra.Command) (*toolEnv, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &toolEnv{cfg: cfg, store: st, out: cmd.OutOrStdout()}, nil
+	// A running relay serve polls for due work, so this process needs no
+	// way to wake its workers.
+	engine := routing.NewEngine(routing.RulesFromConfig(cfg.Routes)).WithNamespaces(routing.NamespacesFromConfig(cfg.Applications))
+	svc := &ops.Service{
+		Store:        st,
+		Reprocessor:  &reprocess.Reprocessor{Store: st, Engine: engine, Logger: quietLogger()},
+		Applications: slices.Sorted(maps.Keys(cfg.Applications)),
+	}
+	return &toolEnv{cfg: cfg, store: st, ops: svc, out: cmd.OutOrStdout()}, nil
 }
 
 // withTool opens the tool environment around fn.
@@ -71,6 +85,14 @@ func ts(t time.Time) string {
 		return "-"
 	}
 	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+// sinceFlag converts a --since duration to a time; 0 means any time.
+func sinceFlag(d time.Duration) time.Time {
+	if d <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(-d)
 }
 
 func dash(s string) string {

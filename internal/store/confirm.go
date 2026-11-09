@@ -29,6 +29,9 @@ func (c Confirmation) Deliverable() bool { return c == ConfirmNone || c == Confi
 // longer pending (resolved elsewhere, or retried by an operator).
 var ErrNotPending = errors.New("store: event is not awaiting confirmation")
 
+// ErrPurged means retention has cleared the event's payload.
+var ErrPurged = errors.New("store: event payload has been purged")
+
 // DueConfirmation is a pending event whose next confirmation attempt is due.
 type DueConfirmation struct {
 	ID         string
@@ -111,7 +114,10 @@ func (s *Store) RejectEvent(ctx context.Context, id, reason string) error {
 		res, err := tx.tx.ExecContext(ctx, `UPDATE events SET confirmation = 'rejected', confirm_next_at = NULL,
 			confirm_error = ?, dedup_key = 'rejected:' || id || ':' || dedup_key
 			WHERE id = ? AND confirmation = 'pending'`, truncate(reason, 500), id)
-		return pendingRow(res, err)
+		if err := pendingRow(res, err); err != nil {
+			return err
+		}
+		return queueAlert(ctx, tx.tx, AlertConfirmationRejects, id, "", time.Now().UTC())
 	})
 }
 
@@ -119,16 +125,17 @@ func (s *Store) RejectEvent(ctx context.Context, id, reason string) error {
 // budget is spent: the event becomes failed.
 func (s *Store) DeferConfirmation(ctx context.Context, id string, attempts int, next time.Time, reason string) error {
 	return s.WithTx(ctx, func(tx *Tx) error {
-		var res sql.Result
-		var err error
 		if next.IsZero() {
-			res, err = tx.tx.ExecContext(ctx, `UPDATE events SET confirmation = 'failed', confirm_attempts = ?,
+			res, err := tx.tx.ExecContext(ctx, `UPDATE events SET confirmation = 'failed', confirm_attempts = ?,
 				confirm_next_at = NULL, confirm_error = ? WHERE id = ? AND confirmation = 'pending'`,
 				attempts, truncate(reason, 500), id)
-		} else {
-			res, err = tx.tx.ExecContext(ctx, `UPDATE events SET confirm_attempts = ?, confirm_next_at = ?,
-				confirm_error = ? WHERE id = ? AND confirmation = 'pending'`, attempts, ms(next), truncate(reason, 500), id)
+			if err := pendingRow(res, err); err != nil {
+				return err
+			}
+			return queueAlert(ctx, tx.tx, AlertConfirmationFailed, id, "", time.Now().UTC())
 		}
+		res, err := tx.tx.ExecContext(ctx, `UPDATE events SET confirm_attempts = ?, confirm_next_at = ?,
+			confirm_error = ? WHERE id = ? AND confirmation = 'pending'`, attempts, ms(next), truncate(reason, 500), id)
 		return pendingRow(res, err)
 	})
 }
@@ -146,7 +153,7 @@ func (s *Store) RetryConfirmation(ctx context.Context, id string, now time.Time)
 			return fmt.Errorf("%w (confirmation is %s)", ErrNotPending, e.Confirmation)
 		}
 		if len(e.RawPayload) == 0 {
-			return errors.New("store: event payload has been purged; it cannot be confirmed")
+			return fmt.Errorf("%w; it cannot be confirmed", ErrPurged)
 		}
 		_, err = tx.tx.ExecContext(ctx, `UPDATE events SET confirmation = 'pending', confirm_next_at = ?,
 			confirm_attempts = 0 WHERE id = ?`, ms(now), id)

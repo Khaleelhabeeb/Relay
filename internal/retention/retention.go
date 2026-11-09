@@ -4,19 +4,26 @@ package retention
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/khaleelhabeeb/relay/internal/store"
 )
 
+// AlertDays is how long queued operator alerts are kept, sent or not.
+const AlertDays = 7
+
 type Purger struct {
 	Store       *store.Store
 	PayloadDays int
 	AttemptDays int
-	Interval    time.Duration // default 6h
-	Logger      *slog.Logger
-	Now         func() time.Time
+	// HeldDays, if positive, dismisses events held (unresolved or
+	// ambiguous) for longer, each with an event.expired alert.
+	HeldDays int
+	Interval time.Duration // default 6h
+	Logger   *slog.Logger
+	Now      func() time.Time
 }
 
 // RunOnce applies retention now.
@@ -26,6 +33,21 @@ func (p *Purger) RunOnce(ctx context.Context) (store.PurgeResult, error) {
 		now = p.Now().UTC()
 	}
 	day := 24 * time.Hour
+	if p.HeldDays > 0 {
+		n, err := p.Store.ExpireHeld(ctx, now.Add(-time.Duration(p.HeldDays)*day), now,
+			fmt.Sprintf("held longer than retention.held_days (%d)", p.HeldDays))
+		if err != nil {
+			return store.PurgeResult{}, err
+		}
+		if n > 0 && p.Logger != nil {
+			p.Logger.Warn("held events expired without an owner", "component", "retention", "events", n, "held_days", p.HeldDays)
+		}
+	}
+	// Alerts are queued whether or not alerting is on; old ones go here so
+	// the outbox stays small either way.
+	if _, err := p.Store.PruneAlerts(ctx, now.Add(-AlertDays*day)); err != nil {
+		return store.PurgeResult{}, err
+	}
 	return p.Store.Purge(ctx, now.Add(-time.Duration(p.PayloadDays)*day), now.Add(-time.Duration(p.AttemptDays)*day))
 }
 

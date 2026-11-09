@@ -102,9 +102,33 @@ func TestEventsListAndInspect(t *testing.T) {
 	}
 
 	out, err = run(t, "events", "list", "-c", cfg, "--json")
-	var rows []map[string]any
-	if err != nil || json.Unmarshal([]byte(out), &rows) != nil || len(rows) != 3 || rows[0]["id"] == nil {
+	var page struct {
+		Data []map[string]any `json:"data"`
+		Next string           `json:"next"`
+	}
+	if err != nil || json.Unmarshal([]byte(out), &page) != nil || len(page.Data) != 3 || page.Data[0]["id"] == nil || page.Next != "" {
 		t.Fatalf("json list: %v\n%s", err, out)
+	}
+
+	// Paging: two pages of two and one, newest first, no overlap.
+	out, err = run(t, "events", "list", "-c", cfg, "--json", "--limit", "2")
+	if err != nil || json.Unmarshal([]byte(out), &page) != nil || len(page.Data) != 2 || page.Next == "" {
+		t.Fatalf("first page: %v\n%s", err, out)
+	}
+	first := page.Data
+	page.Next, page.Data = "", nil
+	out, err = run(t, "events", "list", "-c", cfg, "--json", "--limit", "2", "--after", first[1]["id"].(string))
+	if err != nil || json.Unmarshal([]byte(out), &page) != nil || len(page.Data) != 1 || page.Next != "" ||
+		page.Data[0]["id"] == first[0]["id"] || page.Data[0]["id"] == first[1]["id"] {
+		t.Fatalf("second page: %v\n%s", err, out)
+	}
+	if _, err := run(t, "events", "list", "-c", cfg, "--status", "bogus"); err == nil {
+		t.Error("unknown status must be rejected")
+	}
+
+	out, err = run(t, "stats", "-c", cfg)
+	if err != nil || !strings.Contains(out, "2 unresolved, 0 ambiguous") || !strings.Contains(out, "1 exhausted") {
+		t.Fatalf("stats: %v\n%s", err, out)
 	}
 
 	out, err = run(t, "events", "inspect", "-c", cfg, ids["matched"])
@@ -154,6 +178,28 @@ func TestEventsReprocessAndReroute(t *testing.T) {
 	out, _ = run(t, "events", "inspect", "-c", cfg, ids["orphan"])
 	if !strings.Contains(out, "operator") || !strings.Contains(out, "OPS-42 legacy ref") || !strings.Contains(out, "app_b") {
 		t.Fatalf("reroute audit:\n%s", out)
+	}
+}
+
+func TestEventsDismiss(t *testing.T) {
+	cfg, ids := setup(t)
+	if _, err := run(t, "events", "dismiss", "-c", cfg, ids["orphan"]); err == nil {
+		t.Fatal("dismiss without --reason must fail")
+	}
+	out, err := run(t, "events", "dismiss", "-c", cfg, ids["orphan"], "--reason", "not ours")
+	if err != nil || !strings.Contains(out, "dismissed") {
+		t.Fatalf("dismiss: %v\n%s", err, out)
+	}
+	out, _ = run(t, "events", "inspect", "-c", cfg, ids["orphan"])
+	if !strings.Contains(out, "operator via cli: not ours") {
+		t.Fatalf("inspect after dismiss:\n%s", out)
+	}
+	out, _ = run(t, "events", "list", "-c", cfg, "--held")
+	if strings.Contains(out, ids["orphan"]) || !strings.Contains(out, ids["unresolved"]) {
+		t.Fatalf("--held:\n%s", out)
+	}
+	if out, _ := run(t, "stats", "-c", cfg); !strings.Contains(out, "1 unresolved") {
+		t.Fatalf("stats after dismiss:\n%s", out)
 	}
 }
 

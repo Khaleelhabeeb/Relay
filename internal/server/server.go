@@ -33,9 +33,12 @@ type Server struct {
 // Deps are the components the HTTP layer serves.
 type Deps struct {
 	Acceptor ingest.Acceptor
-	API      http.Handler                    // /v1/ registration API; optional
-	Ready    func(ctx context.Context) error // readiness check; nil means always ready
-	Metrics  *metrics.Metrics                // served at /metrics when non-nil
+	API      http.Handler // /v1/ registration API; optional
+	// Admin is the /v1/admin/ operator API, served only on a separate
+	// api_listen; optional.
+	Admin   http.Handler
+	Ready   func(ctx context.Context) error // readiness check; nil means always ready
+	Metrics *metrics.Metrics                // served at /metrics when non-nil
 	// Adapters are the providers whose webhooks are served at
 	// /webhooks/<name>; nil means Adapters(cfg).
 	Adapters []provider.Adapter
@@ -43,6 +46,7 @@ type Deps struct {
 
 // New builds the HTTP servers. The API (and metrics) are mounted on the main
 // listener unless cfg.Server.APIListen names a separate, private address.
+// The admin API is mounted only on that private address.
 func New(cfg *config.Config, logger *slog.Logger, deps Deps) *Server {
 	mux := http.NewServeMux()
 	registerWebhooks(mux, cfg, logger, deps)
@@ -64,12 +68,15 @@ func New(cfg *config.Config, logger *slog.Logger, deps Deps) *Server {
 
 	s := &Server{logger: logger, main: newHTTPServer(cfg.Server.Listen, mux, logger)}
 	private := mux
-	if cfg.Server.APIListen != "" && (deps.API != nil || deps.Metrics != nil) {
+	if cfg.Server.APIListen != "" && (deps.API != nil || deps.Metrics != nil || deps.Admin != nil) {
 		private = http.NewServeMux()
 		s.api = newHTTPServer(cfg.Server.APIListen, private, logger)
 	}
 	if deps.API != nil {
 		private.Handle("/v1/", deps.API)
+	}
+	if deps.Admin != nil && s.api != nil {
+		private.Handle("/v1/admin/", deps.Admin)
 	}
 	if deps.Metrics != nil {
 		private.Handle("GET /metrics", deps.Metrics.Handler())
@@ -148,7 +155,8 @@ func newHTTPServer(addr string, h http.Handler, logger *slog.Logger) *http.Serve
 // not separated, the API).
 func (s *Server) Handler() http.Handler { return s.main.Handler }
 
-// APIHandler returns the separate API listener's handler, or nil.
+// APIHandler returns the separate API listener's handler (registration
+// API, admin API and metrics), or nil.
 func (s *Server) APIHandler() http.Handler {
 	if s.api == nil {
 		return nil

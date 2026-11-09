@@ -11,6 +11,7 @@ const (
 	Registration    = "reg"
 	RoutingDecision = "rtd"
 	DedupConflict   = "ddc"
+	AlertDigest     = "alr"
 )
 
 // New returns prefix + "_" + a new ULID. Safe for concurrent use.

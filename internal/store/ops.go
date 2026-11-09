@@ -11,24 +11,35 @@ import (
 
 // EventFilter narrows ListEvents. Zero values mean "any".
 type EventFilter struct {
-	Status       string
-	Confirmation string
-	EventType    string
-	Since        time.Time
-	Limit        int
+	Status        string
+	Confirmation  string
+	EventType     string
+	Provider      string
+	ApplicationID string
+	// Held selects only events needing an owner decided: unresolved or
+	// ambiguous, not dismissed, not rejected by the provider API.
+	Held  bool
+	Since time.Time
+	// Before continues a newest-first list: only events listed after the
+	// event with this ID.
+	Before string
+	Limit  int
 }
 
 // EventSummary is an event without its payload.
 type EventSummary struct {
-	ID             string    `json:"id"`
-	EventType      string    `json:"event_type"`
-	RoutingStatus  string    `json:"routing_status"`
-	ApplicationID  string    `json:"application_id"`
-	Reference      string    `json:"reference"`
-	ReceivedAt     time.Time `json:"received_at"`
-	DuplicateCount int       `json:"duplicate_count"`
-	PayloadBytes   int       `json:"payload_bytes"`
-	Confirmation   string    `json:"confirmation"`
+	ID               string    `json:"id"`
+	Provider         string    `json:"provider"`
+	DedicatedAccount string    `json:"dedicated_account"`
+	EventType        string    `json:"event_type"`
+	RoutingStatus    string    `json:"routing_status"`
+	ApplicationID    string    `json:"application_id"`
+	Reference        string    `json:"reference"`
+	ReceivedAt       time.Time `json:"received_at"`
+	DuplicateCount   int       `json:"duplicate_count"`
+	PayloadBytes     int       `json:"payload_bytes"`
+	Confirmation     string    `json:"confirmation"`
+	DismissedAt      time.Time `json:"dismissed_at,omitzero"`
 }
 
 // ListEvents returns events, newest first.
@@ -46,11 +57,24 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]EventSummary, 
 	if f.EventType != "" {
 		where, args = append(where, "event_type = ?"), append(args, f.EventType)
 	}
+	if f.Held {
+		where = append(where, heldCondition)
+	}
+	if f.Provider != "" {
+		where, args = append(where, "provider = ?"), append(args, f.Provider)
+	}
+	if f.ApplicationID != "" {
+		where, args = append(where, "application_id = ?"), append(args, f.ApplicationID)
+	}
 	if !f.Since.IsZero() {
 		where, args = append(where, "received_at >= ?"), append(args, ms(f.Since))
 	}
-	q := `SELECT id, event_type, routing_status, application_id, reference, received_at, duplicate_count,
-		COALESCE(LENGTH(raw_payload), 0), confirmation FROM events`
+	if f.Before != "" {
+		where = append(where, "(received_at, id) < (SELECT received_at, id FROM events WHERE id = ?)")
+		args = append(args, f.Before)
+	}
+	q := `SELECT id, provider, event_type, routing_status, application_id, reference, dedicated_account, received_at,
+		duplicate_count, COALESCE(LENGTH(raw_payload), 0), confirmation, dismissed_at FROM events`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ") //nolint:gosec // where holds only constant "col = ?" fragments
 	}
@@ -65,14 +89,19 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]EventSummary, 
 	var out []EventSummary
 	for rows.Next() {
 		var (
-			e        EventSummary
-			app, ref sql.NullString
-			received int64
+			e             EventSummary
+			app, ref, dva sql.NullString
+			received      int64
+			dismissed     sql.NullInt64
 		)
-		if err := rows.Scan(&e.ID, &e.EventType, &e.RoutingStatus, &app, &ref, &received, &e.DuplicateCount, &e.PayloadBytes, &e.Confirmation); err != nil {
+		if err := rows.Scan(&e.ID, &e.Provider, &e.EventType, &e.RoutingStatus, &app, &ref, &dva, &received,
+			&e.DuplicateCount, &e.PayloadBytes, &e.Confirmation, &dismissed); err != nil {
 			return nil, err
 		}
-		e.ApplicationID, e.Reference, e.ReceivedAt = app.String, ref.String, fromMS(received)
+		if dismissed.Valid {
+			e.DismissedAt = fromMS(dismissed.Int64)
+		}
+		e.ApplicationID, e.Reference, e.DedicatedAccount, e.ReceivedAt = app.String, ref.String, dva.String, fromMS(received)
 		out = append(out, e)
 	}
 	return out, rows.Err()
@@ -82,6 +111,7 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]EventSummary, 
 type DeliveryFilter struct {
 	Status      string
 	Application string
+	EventID     string
 	Limit       int
 }
 
@@ -102,6 +132,9 @@ func (s *Store) ListDeliveries(ctx context.Context, f DeliveryFilter) ([]Deliver
 	}
 	if f.Application != "" {
 		where, args = append(where, "application_id = ?"), append(args, f.Application)
+	}
+	if f.EventID != "" {
+		where, args = append(where, "event_id = ?"), append(args, f.EventID)
 	}
 	q := `SELECT id, event_id, application_id, status, attempt_count, next_attempt_at, created_at, updated_at,
 		last_error FROM deliveries`
@@ -174,8 +207,8 @@ type PurgeResult struct {
 
 // Purge applies the retention policy. Raw payloads are cleared
 // for unsupported events and events the provider API rejected received
-// before payloadCutoff, and for matched events whose deliveries were all
-// delivered before it. Unresolved,
+// before payloadCutoff, for events dismissed before it, and for matched
+// events whose deliveries were all delivered before it. Unresolved,
 // ambiguous, pending and exhausted events keep their payloads. Finished
 // attempt rows older than attemptCutoff are deleted.
 func (s *Store) Purge(ctx context.Context, payloadCutoff, attemptCutoff time.Time) (PurgeResult, error) {
@@ -185,11 +218,12 @@ func (s *Store) Purge(ctx context.Context, payloadCutoff, attemptCutoff time.Tim
 			WHERE raw_payload IS NOT NULL AND (
 				(routing_status = 'unsupported' AND received_at < ?)
 				OR (confirmation = 'rejected' AND received_at < ?)
+				OR (dismissed_at IS NOT NULL AND routing_status != 'matched' AND dismissed_at < ?)
 				OR (routing_status = 'matched'
 					AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = events.id
 						AND (d.status != 'delivered' OR d.delivered_at >= ?))
 					AND EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = events.id)))`,
-			ms(payloadCutoff), ms(payloadCutoff), ms(payloadCutoff))
+			ms(payloadCutoff), ms(payloadCutoff), ms(payloadCutoff), ms(payloadCutoff))
 		if err != nil {
 			return err
 		}
@@ -214,6 +248,8 @@ type Stats struct {
 	DeliveriesByStatus map[string]int64
 	EventsByStatus     map[string]int64
 	OldestPendingAge   time.Duration    // 0 if none pending
+	OldestPendingAt    time.Time        // zero if none pending
+	OldestHeldAt       time.Time        // oldest unresolved or ambiguous event; zero if none
 	Confirmations      map[string]int64 // events pending or failed API confirmation
 }
 
@@ -239,7 +275,7 @@ func (s *Store) Stats(ctx context.Context, now time.Time) (Stats, error) {
 	if err := count(`SELECT status, COUNT(*) FROM deliveries GROUP BY status`, st.DeliveriesByStatus); err != nil {
 		return st, err
 	}
-	if err := count(`SELECT routing_status, COUNT(*) FROM events WHERE routing_status IN ('unresolved', 'ambiguous') GROUP BY routing_status`, st.EventsByStatus); err != nil {
+	if err := count(`SELECT routing_status, COUNT(*) FROM events WHERE `+heldCondition+` GROUP BY routing_status`, st.EventsByStatus); err != nil {
 		return st, err
 	}
 	if err := count(`SELECT confirmation, COUNT(*) FROM events WHERE confirmation IN ('pending', 'failed') GROUP BY confirmation`, st.Confirmations); err != nil {
@@ -250,7 +286,15 @@ func (s *Store) Stats(ctx context.Context, now time.Time) (Stats, error) {
 		return st, err
 	}
 	if oldest.Valid {
-		st.OldestPendingAge = now.Sub(fromMS(oldest.Int64))
+		st.OldestPendingAt = fromMS(oldest.Int64)
+		st.OldestPendingAge = now.Sub(st.OldestPendingAt)
+	}
+	var held sql.NullInt64
+	if err := s.r.QueryRowContext(ctx, `SELECT MIN(received_at) FROM events WHERE `+heldCondition).Scan(&held); err != nil {
+		return st, err
+	}
+	if held.Valid {
+		st.OldestHeldAt = fromMS(held.Int64)
 	}
 	return st, nil
 }
@@ -266,7 +310,7 @@ func limitOr(n, def int) int {
 // after since (zero: any time), oldest first.
 func (s *Store) EventIDsByStatus(ctx context.Context, status string, since time.Time) ([]string, error) {
 	rows, err := s.r.QueryContext(ctx, `SELECT id FROM events WHERE routing_status = ? AND received_at >= ?
-		AND confirmation != 'rejected' ORDER BY received_at`, status, ms(since))
+		AND confirmation != 'rejected' AND dismissed_at IS NULL ORDER BY received_at`, status, ms(since))
 	if err != nil {
 		return nil, err
 	}

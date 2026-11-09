@@ -154,6 +154,17 @@ func (c *Config) validate(extraProviders []string) []error {
 			tokens[t] = id
 		}
 	}
+	if t := c.Server.AdminToken; t != "" {
+		if len(t) < MinSecretLen {
+			fail("server.admin_token_env: token must be at least %d bytes", MinSecretLen)
+		}
+		if other, dup := tokens[t]; dup {
+			fail("server.admin_token_env: same token as applications.%s.registration_token_env; the admin token must be its own", other)
+		}
+		if other, dup := signingSecrets[t]; dup {
+			fail("server.admin_token_env: same value as applications.%s.signing_secret_env; the admin token must be its own", other)
+		}
+	}
 
 	// Reference namespaces must not overlap each other, nor a route that
 	// sends references to a different application.
@@ -231,6 +242,32 @@ func (c *Config) validate(extraProviders []string) []error {
 
 	if c.Retention.PayloadDays < 1 {
 		fail("retention.payload_days: must be at least 1")
+	}
+	if c.Retention.HeldDays < 0 {
+		fail("retention.held_days: must be 0 (never) or more")
+	}
+	{
+		a := c.Alerts
+		if a.Format != AlertFormatJSON && a.Format != AlertFormatSlack {
+			fail("alerts.format: must be %q or %q, got %q", AlertFormatJSON, AlertFormatSlack, a.Format)
+		}
+		if a.URL != "" {
+			if err := CheckEndpoint(a.URL, c.Delivery.AllowInsecureLocal); err != nil {
+				fail("alerts.url_env: %v", err)
+			}
+		}
+		if a.Format == AlertFormatSlack && a.SecretEnv != "" {
+			fail("alerts.secret_env: the slack format is not signed; the URL itself is the secret")
+		}
+		if a.Secret != "" && len(a.Secret) < MinSecretLen {
+			fail("alerts.secret_env: secret must be at least %d bytes", MinSecretLen)
+		}
+		if d := time.Duration(a.DigestInterval); d < 10*time.Second || d > time.Hour {
+			fail("alerts.digest_interval: must be between 10s and 1h")
+		}
+		if r := a.Reminder(); r != 0 && r < time.Hour {
+			fail("alerts.reminder_interval: must be at least 1h, or 0s for no reminders")
+		}
 	}
 	if c.Retention.AttemptDays < 1 {
 		fail("retention.attempt_days: must be at least 1")

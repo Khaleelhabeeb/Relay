@@ -11,6 +11,49 @@ registration API are versioned on their own. Breaking changes to them bump those
 First release: a self-hosted Paystack webhook router.
 
 ### Added
+- **Operator interface for held events and failed deliveries.** Unresolved and ambiguous events,
+  exhausted deliveries and failed confirmations can now be managed three ways, all built on one
+  core (`internal/ops`) with the same rules and audit trail:
+  - **Admin API** (`/v1/admin/`): list and inspect events and deliveries, reroute, reprocess,
+    retry confirmations and deliveries, and `GET /v1/admin/stats`. Enabled by
+    `server.admin_token_env` (at least 32 bytes, distinct from every registration token and
+    signing secret) and served only on `server.api_listen`, never on the public listener.
+    Payloads are returned only with `?include_payload=true`, and those reads are logged.
+  - **Go methods** on `*relay.Relay`: `Events`, `Event`, `Reroute`, `Dismiss`, `Reprocess`,
+    `RetryConfirmation`, `Deliveries`, `RetryDelivery`, `Stats` and `AdminHandler`, plus
+    `relay.ErrWrongState`. Unlike the CLI, they can reprocess events from providers added with
+    `WithProvider`.
+  - Package `relay/admin` holds the shared record types (`Event`, `EventDetail`, `Delivery`,
+    `Stats`, filters and results).
+  - **CLI:** `relay stats`; `relay events list` gains `--provider`, `--application` and
+    `--after` (paging), and `relay deliveries list` gains `--event`.
+  - Reroute audit reasons record the channel: `operator reroute via cli|admin api|go api: …`.
+  - Migration `0005` adds an index for newest-first event listing.
+  - The CLI's `--json` output now uses these records: `relay events list --json` and
+    `relay deliveries list --json` print `{"data": [...]}` (events add `"next"` for paging)
+    instead of a bare array, so use `jq '.data[]'`. `relay events inspect --json` prints an
+    `EventDetail`: the event type is `event_type` (was `type`), the application is
+    `application_id` (was `application`), and attempts are nested in each delivery.
+- **Operator alerts.** `alerts.url_env` sends a digest of what needs attention: `event.unresolved`,
+  `event.ambiguous`, `delivery.exhausted`, `confirmation.failed`, `confirmation.rejected`,
+  `dedup.conflict` and `event.expired`. Each is queued in an outbox in the same transaction as
+  the change, sent at most once per `alerts.digest_interval` (default 1m) and dropped if it no
+  longer holds. A reminder with the totals goes out every `alerts.reminder_interval` (default 24h)
+  while anything still needs attention. `format: slack` posts a Slack message; `format: json`
+  (default) posts an `admin.AlertDigest` signed like a delivery with `alerts.secret_env`.
+  Embedded, `relay.WithAlertHandler` receives the same digests. New metric
+  `relay_alert_digests_total{sink,result}`.
+- **Dismissing held events.** `relay events dismiss`, `POST /v1/admin/events/{id}/dismiss` and
+  `Relay.Dismiss` close an unresolved or ambiguous event that belongs to no application, with a
+  reason. Dismissed events keep their routing status but leave stats, `relay_events_unrouted`,
+  reminders and bulk or registration reprocessing; rerouting one clears the dismissal. Their
+  payloads are cleared `retention.payload_days` after dismissal. `retention.held_days` dismisses
+  events held longer automatically. Event lists gain a `held` filter (`--held`, `?held=true`).
+  Migration `0006` adds the dismissal columns and the alert outbox.
+- **Operator docs.** `docs/database.md` (schema reference, read-only access, backups with
+  `VACUUM INTO` or Litestream, data lifecycle), `docs/held-events.md` (what each alert means and
+  how to resolve it from the CLI, admin API or Go) and Prometheus alert rules in
+  `examples/prometheus/relay-rules.yml`.
 - **Go library.** Relay can be embedded with `go get github.com/khaleelhabeeb/relay`. See
   `docs/library.md`.
   - Package `relay`: `New`, `Handler`/`WebhookHandler`/`APIHandler`, `Run`/`ListenAndServe`,
@@ -124,3 +167,9 @@ First release: a self-hosted Paystack webhook router.
   - Fuzz tests, and a chaos test that sends SIGKILL during ingest and delivery.
 - **Packaging.** Static binaries (linux and darwin, amd64 and arm64), a distroless non-root
   Docker image, a docker-compose demo, and docs.
+
+### Fixed
+- Events were recorded as `confirmation: confirmed` when `confirm_with_api` was off, although
+  nothing was checked. They are now `none`. Adapters can implement the new optional
+  `provider.ConfirmSwitch` (`ConfirmEnabled() bool`) to say whether their API check is on; the
+  built-in adapters do. Events stored before this fix keep the old value.

@@ -21,6 +21,15 @@
 //
 // or let Relay serve the listeners in cfg.Server itself with ListenAndServe.
 //
+// # Operating Relay
+//
+// Events no application can be identified as owning (unresolved), or that
+// more than one claims (ambiguous), are held. The operator methods (Events,
+// Event, Reroute, Dismiss, Reprocess, RetryConfirmation, Deliveries,
+// RetryDelivery and Stats) find and resolve them, and exhausted deliveries, from Go. They do
+// what the relay CLI and the HTTP admin API (AdminHandler) do, with the same
+// rules, and return the record types of package admin.
+//
 // Applications receiving Relay's deliveries in Go can verify them with
 // package receiver.
 //
@@ -33,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -40,11 +50,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/khaleelhabeeb/relay/admin"
 	"github.com/khaleelhabeeb/relay/config"
+	"github.com/khaleelhabeeb/relay/internal/alert"
 	"github.com/khaleelhabeeb/relay/internal/confirm"
 	"github.com/khaleelhabeeb/relay/internal/delivery"
 	"github.com/khaleelhabeeb/relay/internal/ingest"
 	"github.com/khaleelhabeeb/relay/internal/metrics"
+	"github.com/khaleelhabeeb/relay/internal/ops"
 	"github.com/khaleelhabeeb/relay/internal/registration"
 	"github.com/khaleelhabeeb/relay/internal/reprocess"
 	"github.com/khaleelhabeeb/relay/internal/retention"
@@ -62,12 +75,18 @@ import (
 var (
 	// ErrLocked means another Relay process holds the database.
 	ErrLocked = store.ErrLocked
-	// ErrInvalid means a registration request failed validation.
+	// ErrInvalid means a registration or operator request failed
+	// validation, e.g. an unknown application or a reroute without a reason.
 	ErrInvalid = registration.ErrInvalid
 	// ErrConflict means another application owns the identifier.
 	ErrConflict = store.ErrRegistrationConflict
-	// ErrNotFound means no such registration exists for the application.
+	// ErrNotFound means no such registration exists for the application,
+	// or no such event or delivery exists.
 	ErrNotFound = store.ErrNotFound
+	// ErrWrongState means an event or delivery is not in a state that allows
+	// the operator action, e.g. rerouting an event that already has an
+	// owner or retrying a delivery that has not been exhausted.
+	ErrWrongState = ops.ErrWrongState
 	// ErrRunning means Run or ListenAndServe was already called.
 	ErrRunning = errors.New("relay: already running")
 )
@@ -81,6 +100,7 @@ type options struct {
 	logger    *slog.Logger
 	adapters  []provider.Adapter
 	userAgent string
+	alerts    []func(context.Context, admin.AlertDigest) error
 }
 
 // WithLogger sets the structured logger. The default discards logs.
@@ -92,6 +112,17 @@ func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l 
 // provider in routes[].provider.
 func WithProvider(a provider.Adapter) Option {
 	return func(o *options) { o.adapters = append(o.adapters, a) }
+}
+
+// WithAlertHandler calls fn with each operator alert digest: the held
+// events, exhausted deliveries, failed or rejected confirmations,
+// conflicting duplicates and expired events since the last digest, at
+// most once per cfg.Alerts.DigestInterval, plus a reminder every
+// cfg.Alerts.ReminderInterval while anything still needs attention. It
+// runs alongside, or instead of, cfg.Alerts.URL. When fn returns an error,
+// the same alerts are offered again at the next interval.
+func WithAlertHandler(fn func(ctx context.Context, d admin.AlertDigest) error) Option {
+	return func(o *options) { o.alerts = append(o.alerts, fn) }
 }
 
 // WithUserAgent sets the User-Agent of outbound deliveries (default "Relay").
@@ -108,9 +139,12 @@ type Relay struct {
 	server       *server.Server
 	webhooks     http.Handler
 	registration *registration.Handler
+	ops          *ops.Service
+	admin        *ops.Handler
 	dispatcher   *delivery.Dispatcher
 	purger       *retention.Purger
 	confirmer    *confirm.Worker
+	alerter      *alert.Alerter // nil when no alert sink is configured
 	running      atomic.Bool
 }
 
@@ -169,9 +203,28 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Relay, error
 		OnRouted: dispatcher.Nudge, OnPending: confirmer.Nudge}
 	reprocessor := &reprocess.Reprocessor{Store: st, Engine: engine, Logger: logger, Metrics: m, OnRouted: dispatcher.Nudge}
 	reg := registration.NewHandler(cfg, st, reprocessor, logger)
+	svc := &ops.Service{Store: st, Reprocessor: reprocessor, Applications: slices.Sorted(maps.Keys(cfg.Applications)),
+		OnDelivery: dispatcher.Nudge, OnConfirm: confirmer.Nudge}
+	adminAPI := ops.NewHandler(svc, cfg.Server.AdminToken, logger)
+	var sinks []alert.Sink
+	if a := cfg.Alerts; a.URL != "" {
+		sinks = append(sinks, &alert.Webhook{URL: a.URL, Format: a.Format, Secret: a.Secret,
+			Client: delivery.NewHTTPClient(cfg.Delivery.AllowInsecureLocal), UserAgent: o.userAgent})
+	}
+	for _, fn := range o.alerts {
+		if fn != nil {
+			sinks = append(sinks, alert.Func(fn))
+		}
+	}
+	var alerter *alert.Alerter
+	if len(sinks) > 0 {
+		alerter = &alert.Alerter{Store: st, Sinks: sinks, Interval: time.Duration(cfg.Alerts.DigestInterval),
+			Reminder: cfg.Alerts.Reminder(), StatsFn: svc.Stats, Logger: logger, Metrics: m}
+	}
 	deps := server.Deps{
 		Acceptor: acceptor,
 		API:      reg,
+		Admin:    adminAPI,
 		Metrics:  m,
 		Adapters: adapters,
 		Ready: func(ctx context.Context) error {
@@ -189,10 +242,13 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (*Relay, error
 		server:       server.New(cfg, logger, deps),
 		webhooks:     server.Webhooks(cfg, logger, deps),
 		registration: reg,
+		ops:          svc,
+		admin:        adminAPI,
 		dispatcher:   dispatcher,
 		confirmer:    confirmer,
 		purger: &retention.Purger{Store: st, PayloadDays: cfg.Retention.PayloadDays,
-			AttemptDays: cfg.Retention.AttemptDays, Logger: logger},
+			AttemptDays: cfg.Retention.AttemptDays, HeldDays: cfg.Retention.HeldDays, Logger: logger},
+		alerter: alerter,
 	}, nil
 }
 
@@ -261,6 +317,9 @@ func logWarnings(cfg *config.Config, logger *slog.Logger) {
 	if p := cfg.Providers.Monnify; p != nil && p.AllowUnsignedSandbox {
 		logger.Warn("providers.monnify.allow_unsigned_sandbox is enabled: unsigned webhooks are accepted when the Monnify sandbox API confirms them; sandbox only")
 	}
+	if cfg.Server.AdminToken != "" && cfg.Server.APIListen == "" {
+		logger.Warn("server.admin_token_env is set without server.api_listen: ListenAndServe does not serve the admin API on the public listener; set api_listen, or mount AdminHandler on a private listener yourself")
+	}
 	if cfg.Delivery.AllowInsecureLocal {
 		logger.Warn("delivery.allow_insecure_local is enabled: http:// and private destinations are allowed; development only")
 	}
@@ -294,15 +353,93 @@ func (r *Relay) WebhookHandler() http.Handler { return r.webhooks }
 // their registration tokens. Mount it on a private listener.
 func (r *Relay) APIHandler() http.Handler { return r.registration }
 
+// AdminHandler serves the /v1/admin/ operator API, authorized by
+// cfg.Server.AdminToken; without a token it refuses every request. Mount it
+// on a private listener, e.g. mux.Handle("/v1/admin/", r.AdminHandler()).
+// ListenAndServe serves it on cfg.Server.APIListen when that is set.
+func (r *Relay) AdminHandler() http.Handler { return r.admin }
+
+// Events lists events, newest first. Filter by Status: admin.StatusUnresolved
+// or admin.StatusAmbiguous to find held events.
+func (r *Relay) Events(ctx context.Context, f admin.EventFilter) (admin.EventPage, error) {
+	return r.ops.ListEvents(ctx, f)
+}
+
+// Event returns an event with its routing history, deliveries, attempts and
+// conflicting duplicates. The raw payment payload is included only if
+// includePayload. Errors: ErrNotFound.
+func (r *Relay) Event(ctx context.Context, id string, includePayload bool) (admin.EventDetail, error) {
+	return r.ops.GetEvent(ctx, id, includePayload)
+}
+
+// Reroute assigns application as the owner of an unresolved or ambiguous
+// event and queues its delivery (once confirmed, if the provider API must
+// confirm it). The decision and reason are kept in the event's routing
+// history. Errors: ErrNotFound, ErrInvalid (unknown application, empty
+// reason), ErrWrongState (the event is not held, or its payload was purged).
+func (r *Relay) Reroute(ctx context.Context, id, application, reason string) (admin.RerouteResult, error) {
+	return r.ops.Reroute(ctx, id, application, reason, ops.ViaGoAPI)
+}
+
+// Dismiss closes a held event without an owner, e.g. a payment that belongs
+// to none of your applications: nothing is delivered and it no longer
+// counts as held. The reason is kept on the event; rerouting it later
+// clears the dismissal. Errors: ErrNotFound, ErrInvalid (empty reason),
+// ErrWrongState (not held, or already dismissed).
+func (r *Relay) Dismiss(ctx context.Context, id, reason string) (admin.Event, error) {
+	return r.ops.Dismiss(ctx, id, reason, ops.ViaGoAPI)
+}
+
+// Reprocess routes unresolved events again with the current rules and
+// registrations, e.g. after adding a route. A failure on one event is
+// reported in its result entry and does not stop the others.
+func (r *Relay) Reprocess(ctx context.Context, req admin.ReprocessRequest) (admin.ReprocessResult, error) {
+	return r.ops.Reprocess(ctx, req)
+}
+
+// RetryConfirmation retries provider API confirmation now, with a fresh
+// retry window, for an event whose confirmation is pending or failed; it is
+// delivered once confirmed. Errors: ErrNotFound, ErrWrongState.
+func (r *Relay) RetryConfirmation(ctx context.Context, id string) error {
+	return r.ops.RetryConfirmation(ctx, id)
+}
+
+// Deliveries lists deliveries, most recently updated first. Filter by
+// Status: admin.DeliveryExhausted to find deliveries that gave up.
+func (r *Relay) Deliveries(ctx context.Context, f admin.DeliveryFilter) ([]admin.Delivery, error) {
+	return r.ops.ListDeliveries(ctx, f)
+}
+
+// RetryDelivery replays an exhausted delivery to the same owner with a
+// fresh attempt budget. Errors: ErrNotFound, ErrWrongState.
+func (r *Relay) RetryDelivery(ctx context.Context, id string) error {
+	return r.ops.RetryDelivery(ctx, id)
+}
+
+// Stats returns the counts an operator watches: held events, confirmations
+// pending or failed, and deliveries by status.
+func (r *Relay) Stats(ctx context.Context) (admin.Stats, error) {
+	return r.ops.Stats(ctx)
+}
+
 // Run delivers stored events, finishes provider API confirmations that
-// failed at ingest, and applies retention until ctx is cancelled.
+// failed at ingest, applies retention and, when configured, sends operator
+// alerts until ctx is cancelled.
 // Webhooks are accepted and stored without it, but nothing is delivered
 // until it runs. It returns ErrRunning if already running.
 func (r *Relay) Run(ctx context.Context) error {
 	if !r.running.CompareAndSwap(false, true) {
 		return ErrRunning
 	}
-	return runAll(ctx, r.dispatcher.Run, r.confirmer.Run, r.purger.Run)
+	return runAll(ctx, r.workers()...)
+}
+
+func (r *Relay) workers() []func(context.Context) error {
+	w := []func(context.Context) error{r.dispatcher.Run, r.confirmer.Run, r.purger.Run}
+	if r.alerter != nil {
+		w = append(w, r.alerter.Run)
+	}
+	return w
 }
 
 // ListenAndServe runs the workers and serves cfg.Server.Listen (and
@@ -311,7 +448,7 @@ func (r *Relay) ListenAndServe(ctx context.Context) error {
 	if !r.running.CompareAndSwap(false, true) {
 		return ErrRunning
 	}
-	return runAll(ctx, r.server.Run, r.dispatcher.Run, r.confirmer.Run, r.purger.Run)
+	return runAll(ctx, append(r.workers(), r.server.Run)...)
 }
 
 // runAll runs fns with a shared context; when one returns, the rest stop.

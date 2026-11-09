@@ -5,11 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/khaleelhabeeb/relay/internal/store"
+	"github.com/khaleelhabeeb/relay/admin"
 )
 
 func newDeliveriesCmd() *cobra.Command {
@@ -21,7 +20,7 @@ func newDeliveriesCmd() *cobra.Command {
 
 func newDeliveriesListCmd() *cobra.Command {
 	var (
-		f      store.DeliveryFilter
+		f      admin.DeliveryFilter
 		asJSON bool
 	)
 	cmd := &cobra.Command{
@@ -29,20 +28,19 @@ func newDeliveriesListCmd() *cobra.Command {
 		Short: "List deliveries, most recently updated first",
 		Args:  cobra.NoArgs,
 		RunE: withTool(func(ctx context.Context, env *toolEnv, _ []string) error {
-			dels, err := env.store.ListDeliveries(ctx, f)
+			dels, err := env.ops.ListDeliveries(ctx, f)
 			if err != nil {
 				return err
 			}
 			if asJSON {
-				if dels == nil {
-					dels = []store.DeliverySummary{}
-				}
-				return env.json(dels)
+				return env.json(struct {
+					Data []admin.Delivery `json:"data"`
+				}{dels})
 			}
 			env.table("ID\tEVENT\tAPPLICATION\tSTATUS\tATTEMPTS\tNEXT\tLAST ERROR", func(w io.Writer) {
 				for _, d := range dels {
 					next := "-"
-					if d.Status == store.DeliveryPending {
+					if d.Status == admin.DeliveryPending {
 						next = ts(d.NextAttemptAt)
 					}
 					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", d.ID, d.EventID, d.ApplicationID, d.Status, d.AttemptCount, next, dash(d.LastError))
@@ -52,8 +50,9 @@ func newDeliveriesListCmd() *cobra.Command {
 		}),
 	}
 	cmd.Flags().StringVar(&f.Status, "status", "", "pending, in_flight, delivered, exhausted")
-	cmd.Flags().StringVar(&f.Application, "application", "", "application ID")
-	cmd.Flags().IntVar(&f.Limit, "limit", 50, "maximum rows")
+	cmd.Flags().StringVar(&f.ApplicationID, "application", "", "application ID")
+	cmd.Flags().StringVar(&f.EventID, "event", "", "event ID")
+	cmd.Flags().IntVar(&f.Limit, "limit", 50, fmt.Sprintf("maximum rows (at most %d)", admin.MaxLimit))
 	cmd.Flags().BoolVar(&asJSON, "json", false, "output JSON")
 	return cmd
 }
@@ -66,9 +65,9 @@ func newDeliveriesRetryCmd() *cobra.Command {
 		RunE: withTool(func(ctx context.Context, env *toolEnv, args []string) error {
 			var failed int
 			for _, id := range args {
-				err := env.store.RetryDelivery(ctx, id, time.Now())
+				err := env.ops.RetryDelivery(ctx, id)
 				switch {
-				case errors.Is(err, store.ErrNotFound):
+				case errors.Is(err, errNotFound):
 					fmt.Fprintf(env.out, "%s: not found\n", id)
 					failed++
 				case err != nil:

@@ -76,10 +76,32 @@ type Adapter interface {
 // event types the adapter Routes.
 type Confirmer interface {
 	// Confirm returns nil when the provider's record matches e (or
-	// confirmation is turned off), an error wrapping ErrNotConfirmed when
+	// confirmation is turned off; implement ConfirmSwitch so Relay can tell
+	// the two apart), an error wrapping ErrNotConfirmed when
 	// it does not, and any other error when the provider could not be
 	// asked; Relay then answers 503 so the provider retries the webhook.
 	Confirm(ctx context.Context, e *Event, ids Identifiers) error
+}
+
+// ConfirmEnabled reports whether a provider's API check is turned on for a.
+// A Confirmer that does not implement ConfirmSwitch is always on. When it
+// is off Relay does not call Confirm and records the event's confirmation
+// as "none" rather than "confirmed".
+func ConfirmEnabled(a Adapter) bool {
+	if _, ok := a.(Confirmer); !ok {
+		return false
+	}
+	if s, ok := a.(ConfirmSwitch); ok {
+		return s.ConfirmEnabled()
+	}
+	return true
+}
+
+// ConfirmSwitch is optionally implemented by a Confirmer whose API check
+// can be turned off, so Relay can tell "the provider confirmed this event"
+// from "nothing was checked".
+type ConfirmSwitch interface {
+	ConfirmEnabled() bool
 }
 
 // ErrNotConfirmed means the provider's API has no matching record of an

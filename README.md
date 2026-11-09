@@ -103,8 +103,8 @@ payment provider.
 | What Relay found | Status | What happens |
 |---|---|---|
 | Exactly one owning application | `matched` | Delivered |
-| No owner | `unresolved` | Held. You add a rule, the app registers the reference, or you assign it from the CLI. |
-| Conflicting owners | `ambiguous` | Held. You decide from the CLI. |
+| No owner | `unresolved` | Held. You add a rule, the app registers the reference, or you assign it (CLI, admin API or Go). |
+| Conflicting owners | `ambiguous` | Held. You decide (CLI, admin API or Go). See [Operating Relay](#operating-relay). |
 | An event type Relay doesn't route yet | `unsupported` | Stored for audit, nothing to do |
 
 Relay currently routes these payment events:
@@ -630,7 +630,8 @@ version: 1                      # optional; only 1 is supported
 
 server:
   listen: ":8080"               # webhooks, /healthz, /readyz (and the API/metrics unless api_listen is set)
-  api_listen: "127.0.0.1:8081"  # optional private listener for /v1/registrations and /metrics
+  api_listen: "127.0.0.1:8081"  # optional private listener for /v1/registrations, /v1/admin and /metrics
+  admin_token_env: RELAY_ADMIN_TOKEN  # optional: enables the admin API on api_listen (32+ bytes, its own value)
   public_base_url: "https://relay.example.com"   # informational
   max_body_bytes: 1048576       # inbound webhook cap (default 1 MiB, max 16 MiB)
   max_concurrent_webhooks: 256  # webhooks processed at once; excess get 503 + Retry-After (the provider retries)
@@ -692,8 +693,16 @@ delivery:
   allow_insecure_local: false   # DEVELOPMENT ONLY: allow http:// and private/loopback destinations
 
 retention:
-  payload_days: 90              # clear raw payloads this long after successful delivery
+  payload_days: 90              # clear raw payloads this long after successful delivery (or dismissal)
   attempt_days: 90              # delete attempt history older than this
+  held_days: 0                  # dismiss events still unresolved/ambiguous after this many days, with an alert (0 = never)
+
+alerts:                         # optional: tell operators when something needs them (see Alerts)
+  url_env: RELAY_ALERTS_URL     # enables alerts; the URL is read from this variable (Slack URLs are secrets)
+  format: json                  # json (signed like deliveries) or slack
+  secret_env: RELAY_ALERTS_SECRET  # required for json: signing secret, 32+ bytes
+  digest_interval: 1m           # at most one digest this often (10s–1h)
+  reminder_interval: 24h        # re-send a summary while anything needs attention; 0s turns reminders off
 ```
 
 </details>
@@ -787,14 +796,21 @@ volume. Set `storage.dsn: /var/lib/relay/relay.db` in the config you mount.
 | `relay_webhooks_received_total{result="storage_error"}` rising (labelled by `provider`) | Relay can't save events; check the disk |
 | `relay_webhooks_received_total{result="invalid_signature"}` rising | Wrong Paystack secret key, Flutterwave secret hash or Monnify secret key (see the `provider` label), or someone probing the endpoint |
 | `relay_store_up` equal to 0 | The database can't be read |
+| `relay_alert_digests_total{result="failed"}` rising | Alerts aren't reaching `alerts.url`; check the endpoint |
 | `relay_events_awaiting_confirmation{state="failed"}` above 0 | The provider API never confirmed these events; they aren't delivered (`relay events list --confirmation failed`) |
 | `relay_events_awaiting_confirmation{state="pending"}` above 0 for an hour | The provider's API has been failing; check `relay events list --confirmation pending` |
 | `relay_confirmations_total{result="rejected"}` rising | Signed webhooks the provider disowns: someone holding the secret is forging events |
+
+These rules are ready to load in
+[`examples/prometheus/relay-rules.yml`](examples/prometheus/relay-rules.yml).
 
 Logs are JSON on stderr. They carry `event_id`, `delivery_id` and `application`, and never
 contain payment payloads or secrets.
 
 ### Backups, upgrades and retention
+
+The [database guide](docs/database.md) covers the schema, safe read-only queries, Litestream
+replication and the data lifecycle in full.
 
 - **Back up** while Relay runs. The file contains payment events, so encrypt it:
   `sqlite3 /var/lib/relay/relay.db "VACUUM INTO '/backups/relay-$(date +%F).db'"`
@@ -806,19 +822,42 @@ contain payment payloads or secrets.
   the server; it refuses a mismatched database.
 - **Retention:** every 6 hours Relay clears raw payloads of delivered and `unsupported` events
   older than `retention.payload_days`, and deletes attempt history older than
-  `retention.attempt_days`. Payloads of events the provider API rejected are cleared on the same
-  schedule. Events that are unresolved, ambiguous, pending (delivery or confirmation) or
-  exhausted keep their payloads until they're resolved.
+  `retention.attempt_days`. Payloads of events the provider API rejected, and of events
+  dismissed more than `retention.payload_days` ago, are cleared on the same schedule. Events that
+  are unresolved, ambiguous, pending (delivery or confirmation) or exhausted keep their payloads
+  until they're resolved. Set `retention.held_days` to dismiss events nobody resolves.
 
 ## Operating Relay
+
+Events Relay can't give an owner are **held**: `unresolved` (no owner) or `ambiguous`
+(conflicting owners). So are deliveries that ran out of retries (`exhausted`) and events the
+provider's API couldn't confirm. Nothing is lost, but nothing is delivered either until someone
+acts. You can find and resolve all of them three ways, with the same rules and the same audit
+trail:
+
+| Way in | Best for |
+|---|---|
+| The `relay` CLI | An operator at a terminal |
+| The [admin API](#admin-api) | Your own admin panel, scripts and alerting, in any language |
+| [Go methods on `*relay.Relay`](#use-relay-as-a-go-library) | Programs that embed Relay |
+
+You don't have to remember to look: [alerts](#alerts) tell you when something needs you, and
+remind you until it's dealt with. [Handling held events](docs/held-events.md) says what to do for
+each kind. You can also check `relay stats` (or `GET /v1/admin/stats`), or
+alert on the [metrics](#health-checks-and-metrics).
+
+### The CLI
 
 The `relay` CLI works against a running server. It only needs the config file, not the secrets.
 
 | Task | Command |
 |---|---|
+| What needs attention right now | `relay stats` |
+| See everything waiting for an owner | `relay events list --held` |
 | See payments nobody claimed | `relay events list --status unresolved` |
 | Full history of one event | `relay events inspect evt_…` (add `--show-payload` to print the payment data) |
 | Re-run routing after adding a rule | `relay events reprocess` |
+| Close an event that belongs to none of your applications | `relay events dismiss evt_… --reason "test payment"` |
 | Assign an owner yourself (recorded with a reason) | `relay events reroute evt_… --application app_b --reason "ticket 42"` |
 | Events held for provider API confirmation | `relay events list --confirmation pending` (or `failed`) |
 | Retry the API check now (after an outage) | `relay events confirm evt_…` |
@@ -826,21 +865,143 @@ The `relay` CLI works against a running server. It only needs the config file, n
 | Replay them once the application is back | `relay deliveries retry del_…` |
 | List registrations | `relay registrations list --application app_b` |
 
-Every list command accepts `--json`. To replay everything an application missed:
+Every list and `stats` command accepts `--json`, which prints the same records as the admin API.
+`relay events list` returns 50 events by default (`--limit` up to 500). When there are more, it
+prints the `--after` value for the next page. To replay everything an application missed:
 
 ```bash
-relay deliveries list --status exhausted --application app_b --json | jq -r '.[].id' | xargs relay deliveries retry
+relay deliveries list --status exhausted --application app_b --json | jq -r '.data[].id' | xargs relay deliveries retry
 ```
 
 **When an event is `unresolved`,** run `relay events inspect` to see its reference, metadata and
 the reason. Then do one of these:
 - add or fix a route, restart, and run `relay events reprocess`;
 - have the application register the identifier, which routes the event automatically;
-- assign the owner with `relay events reroute`.
+- assign the owner with `relay events reroute`;
+- if it belongs to none of your applications (a test payment, another business on the same
+  account), close it with `relay events dismiss`. It keeps its history but stops counting as held.
+  Rerouting it later still works.
 
 **When an event is `ambiguous`,** two sources of evidence disagree. Fix the configuration so it
 can't happen again, then decide the owner with `relay events reroute`. Relay never changes the
 owner of an event that is already `matched`.
+
+### Admin API
+
+The admin API does everything the CLI does, over HTTP, so you can build held events into your
+own admin panel or scripts. It's off until you give it a token:
+
+```yaml
+server:
+  api_listen: "127.0.0.1:8081"        # required: the admin API is never served on the public listener
+  admin_token_env: RELAY_ADMIN_TOKEN  # at least 32 bytes, e.g. openssl rand -hex 32
+```
+
+The admin token is an operator credential. It must differ from every application's registration
+token and signing secret, and it can read payment payloads and reroute any event, so keep it out
+of your applications. Send it as `Authorization: Bearer <token>`.
+
+| Method and path | Does |
+|---|---|
+| `GET /v1/admin/stats` | Held events, confirmations and deliveries by status, with the oldest of each |
+| `GET /v1/admin/events` | Events, newest first. Filters: `held=true` (needing an owner decided), `status`, `confirmation`, `type`, `provider`, `application`, `since` (RFC 3339), `limit` (1–500, default 50), `after` (the previous page's `next`) |
+| `GET /v1/admin/events/{id}` | One event's routing history, deliveries, attempts and conflicting duplicates. `?include_payload=true` adds the raw payment payload, and the read is logged. |
+| `POST /v1/admin/events/{id}/reroute` | Assign an owner to a held event: `{"application": "app_b", "reason": "ticket 42"}` |
+| `POST /v1/admin/events/reprocess` | Route unresolved events again: `{"event_ids": [...]}`, or `{"since": "…"}`, or `{}` for all |
+| `POST /v1/admin/events/{id}/dismiss` | Close a held event without an owner: `{"reason": "test payment"}` |
+| `POST /v1/admin/events/{id}/confirm` | Retry provider API confirmation now |
+| `GET /v1/admin/deliveries` | Deliveries, most recently updated first. Filters: `status`, `application`, `event`, `limit` |
+| `POST /v1/admin/deliveries/{id}/retry` | Replay an exhausted delivery |
+
+```bash
+curl -s -H "Authorization: Bearer $RELAY_ADMIN_TOKEN" \
+  'http://127.0.0.1:8081/v1/admin/events?status=unresolved'
+```
+
+```json
+{
+  "data": [
+    {"id": "evt_01J…", "provider": "paystack", "event_type": "charge.success",
+     "routing_status": "unresolved", "reference": "LEGACY_7", "received_at": "2026-11-07T09:12:44Z",
+     "duplicate_count": 0, "payload_bytes": 1830, "confirmation": "none"}
+  ],
+  "next": "evt_01J…"
+}
+```
+
+Errors use the same body as the registration API, `{"error": {"code", "message"}}`:
+`unauthorized` (401), `not_found` (404), `validation_failed` (422), `invalid_state` (409, e.g.
+rerouting an event that already has an owner or retrying a delivery that isn't exhausted) and
+`admin_disabled` (404, no admin token configured). Reroutes made through the API are recorded
+as `operator` decisions with the reason and `via admin api`.
+
+### Alerts
+
+Relay can tell you when something needs you, so you don't have to poll. Each of these raises an
+alert once, when it happens:
+
+| Alert | Meaning |
+|---|---|
+| `event.unresolved` | A payment arrived and no application owns it |
+| `event.ambiguous` | More than one application claims a payment |
+| `delivery.exhausted` | An application missed an event: its retries are used up |
+| `confirmation.failed` | The provider's API never confirmed an event, so it isn't delivered |
+| `confirmation.rejected` | The provider's API disowned a signed webhook: someone holding the secret may be forging events |
+| `dedup.conflict` | A duplicate webhook carried different ownership identifiers: possible forgery |
+| `event.expired` | An event was held longer than `retention.held_days` and was dismissed |
+
+Alerts are grouped into a **digest**, sent at most once per `digest_interval` (default 1 minute),
+so a misconfigured route doesn't flood you. Each digest lists up to 50 alerts, counts all of them,
+and includes the current totals. Alerts that no longer apply by the time the digest is built, such
+as an event rerouted in the meantime, are left out. While anything still needs attention, a
+**reminder** with the totals goes out every `reminder_interval` (default 24 hours). Digests never
+contain payment payloads, only IDs, references and reasons.
+
+Send them to Slack:
+
+```yaml
+alerts:
+  url_env: RELAY_ALERTS_URL   # a Slack incoming-webhook URL
+  format: slack
+```
+
+Or to your own endpoint as signed JSON:
+
+```yaml
+alerts:
+  url_env: RELAY_ALERTS_URL
+  secret_env: RELAY_ALERTS_SECRET   # 32+ bytes
+```
+
+The JSON digest is signed exactly like a delivery, with the digest ID as both
+`X-Relay-Event-ID` and `X-Relay-Delivery-ID`. You can check it with the same verification code,
+or `receiver.Verify` in Go:
+
+```json
+{
+  "type": "relay.alerts",
+  "id": "alr_01J…",
+  "sent_at": "2026-11-09T10:15:00Z",
+  "reminder": false,
+  "counts": {"event.unresolved": 2, "delivery.exhausted": 1},
+  "alerts": [
+    {"kind": "event.unresolved", "event_id": "evt_01J…", "provider": "paystack",
+     "event_type": "charge.success", "reference": "LEGACY_7", "at": "2026-11-09T10:14:12Z"},
+    {"kind": "delivery.exhausted", "event_id": "evt_01J…", "delivery_id": "del_01J…",
+     "application_id": "app_b", "detail": "HTTP 503", "at": "2026-11-09T10:14:40Z"}
+  ],
+  "omitted": 0,
+  "stats": {"events": {"unresolved": 4, "ambiguous": 0, "oldest_held_at": "…",
+            "confirmation_pending": 0, "confirmation_failed": 0},
+            "deliveries": {"pending": 0, "in_flight": 0, "delivered": 812, "exhausted": 1}}
+}
+```
+
+Alerts are recorded in the same database transaction as the change they report, so a crash never
+loses one. If your endpoint is down, the same alerts are sent again at the next interval; they
+are kept for 7 days. To give up on old events automatically, set `retention.held_days`: events
+held longer are dismissed, with a final `event.expired` alert. When you embed Relay in Go,
+`relay.WithAlertHandler` receives the same digests.
 
 ## Switching your provider to Relay
 
@@ -1098,11 +1259,21 @@ go r.Run(ctx)                                          // delivery and retention
 
 // Claim a reference in-process when you create an order:
 _, routed, err := r.RegisterReference(ctx, "billing", "paystack", "ORDER_1001")
+
+// Find and resolve held events from your own code:
+page, err := r.Events(ctx, admin.EventFilter{Status: admin.StatusUnresolved})
+_, err = r.Reroute(ctx, page.Events[0].ID, "billing", "legacy order, ticket 42")
 ```
+
+The operator methods `Events`, `Event`, `Reroute`, `Dismiss`, `Reprocess`, `RetryConfirmation`,
+`Deliveries`, `RetryDelivery` and `Stats` do what the CLI and the admin API do, with the same
+rules. Mount `r.AdminHandler()` on a private listener to serve the admin API yourself, and pass
+`relay.WithAlertHandler` to receive [alert](#alerts) digests in Go.
 
 | Package | Use it to |
 |---|---|
-| `relay` | Embed Relay: `New`, `Handler`/`WebhookHandler`/`APIHandler`, `Run`/`ListenAndServe`, `RegisterReference` |
+| `relay` | Embed Relay: `New`, `Handler`/`WebhookHandler`/`APIHandler`/`AdminHandler`, `Run`/`ListenAndServe`, `RegisterReference`, and the operator methods |
+| `relay/admin` | The records the operator methods, admin API and `--json` output share: `Event`, `EventDetail`, `Delivery`, `Stats` and the filters |
 | `relay/config` | Load `relay.yaml`, or build and `Validate` a configuration in Go |
 | `relay/receiver` | Verify Relay's deliveries in a Go application (`receiver.Handler`) |
 | `relay/provider` | The `Adapter` interface. Implement it and pass `relay.WithProvider` to add a payment provider. |

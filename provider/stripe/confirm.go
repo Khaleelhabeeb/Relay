@@ -39,6 +39,9 @@ var comparedFields = []string{
 	"status", "payment_status", "amount", "amount_total", "amount_received", "currency",
 }
 
+// ConfirmEnabled implements provider.ConfirmSwitch.
+func (a Adapter) ConfirmEnabled() bool { return a.ConfirmWithAPI }
+
 // Confirm implements provider.Confirmer. When ConfirmWithAPI is set it
 // fetches the event with GET /v1/events/{id} and requires its type,
 // livemode and the comparedFields of data.object to match the webhook. An
