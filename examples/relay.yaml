@@ -6,6 +6,10 @@ server:
   listen: ":8080"
   public_base_url: "https://relay.example.com"
   max_body_bytes: 1048576
+  # Admin API (/v1/admin) for managing held events from your own tools.
+  # Served only on the private api_listen address.
+  # api_listen: "127.0.0.1:8081"
+  # admin_token_env: RELAY_ADMIN_TOKEN
 
 storage:
   driver: sqlite
@@ -58,3 +62,12 @@ delivery:
   max_attempts: 10
   timeout_seconds: 10
   worker_count: 8
+
+# Optional: tell operators when something needs them (held events,
+# exhausted deliveries, possible forgery). See docs/held-events.md.
+# alerts:
+#   url_env: RELAY_ALERTS_URL      # e.g. a Slack incoming-webhook URL
+#   format: slack                  # or json, signed with secret_env
+#
+# retention:
+#   held_days: 30                  # dismiss events nobody resolves after 30 days

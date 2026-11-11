@@ -137,7 +137,14 @@ func (s *Store) CompleteAttempt(ctx context.Context, r AttemptResult) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrLeaseLost
 		}
-		return nil
+		if r.Status != DeliveryExhausted {
+			return nil
+		}
+		var eventID string
+		if err := tx.QueryRowContext(ctx, `SELECT event_id FROM deliveries WHERE id = ?`, r.DeliveryID).Scan(&eventID); err != nil {
+			return err
+		}
+		return queueAlert(ctx, tx, AlertDeliveryExhausted, eventID, r.DeliveryID, r.FinishedAt)
 	})
 }
 

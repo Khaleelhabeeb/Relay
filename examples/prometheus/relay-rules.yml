@@ -1,0 +1,58 @@
+# Prometheus alerting rules for Relay. Load with rule_files in prometheus.yml.
+# Requires server.metrics: true. See docs/held-events.md for what to do.
+groups:
+  - name: relay
+    rules:
+      - alert: RelayEventsHeld
+        expr: sum by (status) (relay_events_unrouted) > 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} {{ $labels.status }} payment event(s) have no owner"
+          description: "Run `relay events list --held` and see docs/held-events.md."
+
+      - alert: RelayDeliveriesExhausted
+        expr: relay_deliveries{status="exhausted"} > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} delivery(ies) ran out of retries"
+          description: "An application missed events. Replay with `relay deliveries retry` once it is healthy."
+
+      - alert: RelayDeliveryBacklog
+        expr: relay_oldest_pending_delivery_age_seconds > 3600
+        labels: {severity: warning}
+        annotations:
+          summary: "An application has been failing deliveries for over an hour"
+
+      - alert: RelayConfirmationFailed
+        expr: relay_events_awaiting_confirmation{state="failed"} > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Events the provider API never confirmed are not being delivered"
+          description: "Retry with `relay events confirm` once the provider API is healthy."
+
+      - alert: RelayPossibleForgery
+        expr: >-
+          increase(relay_confirmations_total{result="rejected"}[15m]) > 0
+          or increase(relay_webhooks_received_total{result=~"not_confirmed|dedup_conflict"}[15m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Signed webhooks the provider disowns, or conflicting duplicates: someone may hold your webhook secret"
+
+      - alert: RelayStorageErrors
+        expr: increase(relay_webhooks_received_total{result="storage_error"}[5m]) > 0 or relay_store_up == 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Relay cannot read or write its database; check the disk"
+
+      - alert: RelayInvalidSignatures
+        expr: increase(relay_webhooks_received_total{result="invalid_signature"}[15m]) > 10
+        labels: {severity: warning}
+        annotations:
+          summary: "Webhooks with invalid signatures ({{ $labels.provider }}): wrong secret, or someone probing the endpoint"
+
+      - alert: RelayAlertsFailing
+        expr: increase(relay_alert_digests_total{result="failed"}[30m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Relay's alert digests are not reaching alerts.url"

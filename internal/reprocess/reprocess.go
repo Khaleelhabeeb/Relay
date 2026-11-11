@@ -48,7 +48,8 @@ func (r *Reprocessor) Event(ctx context.Context, eventID, decidedBy string) (rou
 			return err
 		}
 		outcome = e.RoutingStatus
-		if e.RoutingStatus != routing.Unresolved || len(e.RawPayload) == 0 {
+		// A dismissed event stays closed unless an operator reroutes it.
+		if e.RoutingStatus != routing.Unresolved || len(e.RawPayload) == 0 || !e.DismissedAt.IsZero() {
 			return nil
 		}
 		// Stored payloads were verified at ingest; the engine's adapter
@@ -107,8 +108,9 @@ func (r *Reprocessor) Unresolved(ctx context.Context, since time.Time, decidedBy
 var ErrNotReroutable = errors.New("reprocess: only unresolved or ambiguous events can be rerouted")
 
 // Reroute assigns an owner to an unresolved or ambiguous event by explicit
-// operator decision, recorded with the reason, and creates its delivery.
-func (r *Reprocessor) Reroute(ctx context.Context, eventID, application, reason string) error {
+// operator decision, recorded with the reason and the channel it came
+// through (via, e.g. "cli"), and creates its delivery.
+func (r *Reprocessor) Reroute(ctx context.Context, eventID, application, reason, via string) error {
 	if strings.TrimSpace(reason) == "" {
 		return errors.New("reprocess: a reason is required")
 	}
@@ -124,13 +126,13 @@ func (r *Reprocessor) Reroute(ctx context.Context, eventID, application, reason 
 			return fmt.Errorf("%w (the provider API rejected it: %s)", ErrNotReroutable, e.ConfirmError)
 		}
 		if len(e.RawPayload) == 0 {
-			return errors.New("reprocess: event payload has been purged; it cannot be delivered")
+			return fmt.Errorf("%w; it cannot be delivered", store.ErrPurged)
 		}
 		d := routing.Decision{
 			Outcome:     routing.Matched,
 			Application: application,
 			Candidates:  []routing.Candidate{{Application: application, Source: "operator", Detail: reason}},
-			Reason:      "operator reroute: " + reason,
+			Reason:      "operator reroute via " + via + ": " + reason,
 		}
 		if err := tx.SetEventRouting(ctx, eventID, d.Outcome, application); err != nil {
 			return err
@@ -140,7 +142,7 @@ func (r *Reprocessor) Reroute(ctx context.Context, eventID, application, reason 
 	if err != nil {
 		return err
 	}
-	r.Logger.Info("event rerouted by operator", "component", "reprocess", "event_id", eventID, "application", application)
+	r.Logger.Info("event rerouted by operator", "component", "reprocess", "event_id", eventID, "application", application, "via", via)
 	if r.OnRouted != nil {
 		r.OnRouted()
 	}

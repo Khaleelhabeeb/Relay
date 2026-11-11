@@ -11,6 +11,8 @@ coverage.out
 
 docs/*
 !docs/library.md
+!docs/database.md
+!docs/held-events.md
 !docs/index.html
 !docs/docs.html
 !docs/style.css

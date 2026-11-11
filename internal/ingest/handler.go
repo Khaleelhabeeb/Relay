@@ -128,7 +128,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		confirmErr   string
 		receivedAt   = h.now()
 	)
-	if c, ok := h.Adapter.(provider.Confirmer); ok && h.Adapter.Routes(evt.Type) {
+	if c, ok := h.Adapter.(provider.Confirmer); ok && provider.ConfirmEnabled(h.Adapter) && h.Adapter.Routes(evt.Type) {
 		cctx, cancel := context.WithTimeout(r.Context(), confirmTimeout)
 		err := c.Confirm(cctx, evt, ids)
 		cancel()

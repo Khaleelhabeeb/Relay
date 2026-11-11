@@ -23,6 +23,7 @@ type Metrics struct {
 	attemptDuration prometheus.Histogram
 	exhausted       *prometheus.CounterVec
 	confirmations   *prometheus.CounterVec
+	alerts          *prometheus.CounterVec
 }
 
 // New registers Relay's metrics. st, if non-nil, backs scrape-time gauges
@@ -60,8 +61,12 @@ func New(st *store.Store) *Metrics {
 			Name: "relay_confirmations_total",
 			Help: "Provider API confirmations finished in the background, by provider and result (deferred: the API failed at ingest and the event waits; confirmed; rejected; retry; failed: retry budget spent).",
 		}, []string{"provider", "result"}),
+		alerts: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "relay_alert_digests_total",
+			Help: "Operator alert digests by sink and result (sent, failed).",
+		}, []string{"sink", "result"}),
 	}
-	m.registry.MustRegister(m.webhooks, m.acceptLatency, m.routed, m.attempts, m.attemptDuration, m.exhausted, m.confirmations,
+	m.registry.MustRegister(m.webhooks, m.acceptLatency, m.routed, m.attempts, m.attemptDuration, m.exhausted, m.confirmations, m.alerts,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	if st != nil {
 		m.registry.MustRegister(&storeCollector{store: st})
@@ -90,6 +95,18 @@ func (m *Metrics) Routed(outcome string) {
 	if m != nil {
 		m.routed.WithLabelValues(outcome).Inc()
 	}
+}
+
+// AlertDigest counts an alert digest sent to sink, or failed.
+func (m *Metrics) AlertDigest(sink string, ok bool) {
+	if m == nil {
+		return
+	}
+	result := "sent"
+	if !ok {
+		result = "failed"
+	}
+	m.alerts.WithLabelValues(sink, result).Inc()
 }
 
 // Confirmation counts a provider API confirmation result.

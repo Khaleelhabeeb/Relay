@@ -104,6 +104,29 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func TestAdminToken(t *testing.T) {
+	c, err := loadYAML(t, base+"server: {admin_token_env: RELAY_ADMIN_TOKEN}\n", testEnv(map[string]string{"RELAY_ADMIN_TOKEN": strings.Repeat("z", 32)}))
+	if err != nil || c.Server.AdminToken != strings.Repeat("z", 32) {
+		t.Fatalf("admin token not resolved: %v", err)
+	}
+	if c, err := loadYAML(t, base, testEnv(nil)); err != nil || c.Server.AdminToken != "" {
+		t.Fatalf("admin API must be off by default: %v", err)
+	}
+}
+
+func TestAlertsConfig(t *testing.T) {
+	c, err := loadYAML(t, base, testEnv(nil))
+	if err != nil || c.Alerts.URL != "" || c.Alerts.Reminder() != DefaultAlertReminderInterval ||
+		time.Duration(c.Alerts.DigestInterval) != DefaultAlertDigestInterval || c.Retention.HeldDays != 0 {
+		t.Fatalf("alerts must be off by default: %+v %v", c.Alerts, err)
+	}
+	c, err = loadYAML(t, base+"alerts: {url_env: ALERTS_URL, format: slack, reminder_interval: 0s}\nretention: {held_days: 30}\n",
+		testEnv(map[string]string{"ALERTS_URL": "https://hooks.slack.com/services/x"}))
+	if err != nil || c.Alerts.URL != "https://hooks.slack.com/services/x" || c.Alerts.Reminder() != 0 || c.Retention.HeldDays != 30 {
+		t.Fatalf("slack alerts: %+v %v", c.Alerts, err)
+	}
+}
+
 func TestValidationErrors(t *testing.T) {
 	cases := []struct {
 		name string
@@ -136,6 +159,18 @@ func TestValidationErrors(t *testing.T) {
 		{"max attempts range", base + "delivery: {max_attempts: 500}\n", nil, "max_attempts"},
 		{"bad trusted proxy", base + "server: {trusted_proxies: [not-an-ip]}\n", nil, "trusted_proxies"},
 		{"api_listen same as listen", base + "server: {listen: ':8080', api_listen: ':8080'}\n", nil, "api_listen"},
+		{"alerts url unset", base + "alerts: {url_env: RELAY_ALERTS_URL, secret_env: RELAY_ALERTS_SECRET}\n", nil, "RELAY_ALERTS_URL is not set"},
+		{"alerts json without secret", base + "alerts: {url_env: ALERTS_URL}\n", map[string]string{"ALERTS_URL": "https://alerts.example.com/h"}, "alerts.secret_env: required"},
+		{"alerts short secret", base + "alerts: {url_env: ALERTS_URL, secret_env: ALERTS_SECRET}\n", map[string]string{"ALERTS_URL": "https://alerts.example.com/h", "ALERTS_SECRET": "short"}, "alerts.secret_env: secret must be"},
+		{"alerts slack with secret", base + "alerts: {url_env: ALERTS_URL, format: slack, secret_env: X}\n", map[string]string{"ALERTS_URL": "https://hooks.slack.com/services/x"}, "slack format is not signed"},
+		{"alerts http url", base + "alerts: {url_env: ALERTS_URL, format: slack}\n", map[string]string{"ALERTS_URL": "http://alerts.example.com"}, "alerts.url_env: scheme must be https"},
+		{"alerts bad format", base + "alerts: {format: email}\n", nil, "alerts.format"},
+		{"alerts digest too fast", base + "alerts: {digest_interval: 1s}\n", nil, "alerts.digest_interval"},
+		{"alerts reminder too fast", base + "alerts: {reminder_interval: 5m}\n", nil, "alerts.reminder_interval"},
+		{"negative held days", base + "retention: {held_days: -1}\n", nil, "retention.held_days"},
+		{"unset admin token", base + "server: {admin_token_env: RELAY_ADMIN_TOKEN}\n", nil, "RELAY_ADMIN_TOKEN is not set"},
+		{"short admin token", base + "server: {admin_token_env: RELAY_ADMIN_TOKEN}\n", map[string]string{"RELAY_ADMIN_TOKEN": "short"}, "server.admin_token_env: token must be at least 32 bytes"},
+		{"admin token reuses registration token", base + "server: {admin_token_env: APP_A_RELAY_API_TOKEN}\n", nil, "the admin token must be its own"},
 		{"unsupported version", "version: 2\n" + base, nil, "unsupported version"},
 		{"no providers", strings.Replace(base, "providers: {paystack: {secret_env: PAYSTACK_SECRET_KEY}}", "", 1), nil, "at least one provider"},
 		{"missing flutterwave hash", bothProviders, map[string]string{"FLW_SECRET_HASH": ""}, "FLW_SECRET_HASH is not set"},

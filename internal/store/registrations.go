@@ -210,7 +210,7 @@ func (s *Store) UnresolvedEventIDs(ctx context.Context, provider, identifierType
 		column = "dedicated_account"
 	}
 	rows, err := s.r.QueryContext(ctx, `SELECT id FROM events WHERE provider = ? AND `+column+` = ?
-		AND routing_status = 'unresolved' AND confirmation != 'rejected' AND received_at >= ? ORDER BY received_at`, provider, value, ms(since))
+		AND routing_status = 'unresolved' AND dismissed_at IS NULL AND confirmation != 'rejected' AND received_at >= ? ORDER BY received_at`, provider, value, ms(since))
 	if err != nil {
 		return nil, err
 	}
@@ -233,8 +233,13 @@ func (t *Tx) GetEvent(ctx context.Context, id string) (*Event, error) {
 
 // SetEventRouting records an event's new routing outcome.
 func (t *Tx) SetEventRouting(ctx context.Context, id string, outcome routing.Outcome, application string) error {
-	_, err := t.tx.ExecContext(ctx, `UPDATE events SET routing_status = ?, application_id = ? WHERE id = ?`,
-		string(outcome), nullString(application), id)
+	// An owned event is no longer dismissed.
+	_, err := t.tx.ExecContext(ctx, `UPDATE events SET routing_status = ?, application_id = ?,
+		dismissed_at = CASE WHEN ? = 'matched' THEN NULL ELSE dismissed_at END,
+		dismissed_by = CASE WHEN ? = 'matched' THEN NULL ELSE dismissed_by END,
+		dismiss_reason = CASE WHEN ? = 'matched' THEN NULL ELSE dismiss_reason END
+		WHERE id = ?`,
+		string(outcome), nullString(application), string(outcome), string(outcome), string(outcome), id)
 	return err
 }
 
@@ -255,7 +260,13 @@ func (t *Tx) ApplyDecision(ctx context.Context, eventID string, d routing.Decisi
 	}); err != nil {
 		return err
 	}
-	if d.Outcome != routing.Matched {
+	switch d.Outcome {
+	case routing.Unresolved:
+		return queueAlert(ctx, t.tx, AlertUnresolved, eventID, "", at)
+	case routing.Ambiguous:
+		return queueAlert(ctx, t.tx, AlertAmbiguous, eventID, "", at)
+	case routing.Matched:
+	default:
 		return nil
 	}
 	// An event awaiting (or refused) provider API confirmation is routed but

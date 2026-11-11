@@ -61,6 +61,7 @@ type Config struct {
 	Routes       []RouteConfig                 `yaml:"routes"`
 	Delivery     DeliveryConfig                `yaml:"delivery"`
 	Retention    RetentionConfig               `yaml:"retention"`
+	Alerts       AlertsConfig                  `yaml:"alerts"`
 }
 
 type ServerConfig struct {
@@ -76,6 +77,13 @@ type ServerConfig struct {
 	// MaxConcurrentWebhooks caps webhooks processed at once; excess get 503.
 	MaxConcurrentWebhooks int      `yaml:"max_concurrent_webhooks"`
 	TrustedProxies        []string `yaml:"trusted_proxies"`
+	// AdminTokenEnv names the environment variable holding the operator
+	// token for the admin API (/v1/admin). The admin API is off without it,
+	// and is served only on api_listen, never on the public listener.
+	AdminTokenEnv string `yaml:"admin_token_env"`
+	// AdminToken is resolved from AdminTokenEnv; set it directly when
+	// building a Config in Go.
+	AdminToken string `yaml:"-"`
 }
 
 type StorageConfig struct {
@@ -257,6 +265,51 @@ type DeliveryConfig struct {
 type RetentionConfig struct {
 	PayloadDays int `yaml:"payload_days"`
 	AttemptDays int `yaml:"attempt_days"`
+	// HeldDays, when set, dismisses events still unresolved or ambiguous
+	// this many days after they arrived, with a final event.expired alert.
+	// 0 (the default) keeps them held until someone acts.
+	HeldDays int `yaml:"held_days"`
+}
+
+// Alert formats.
+const (
+	AlertFormatJSON  = "json"
+	AlertFormatSlack = "slack"
+)
+
+// AlertsConfig sends operator alerts (held events, exhausted deliveries,
+// failed or rejected confirmations, conflicting duplicates) as a digest to
+// a URL. Alerts are off unless URLEnv is set (or, embedded, an alert
+// handler is added in Go).
+type AlertsConfig struct {
+	// URLEnv names the environment variable holding the URL; Slack
+	// incoming-webhook URLs are secrets.
+	URLEnv string `yaml:"url_env"`
+	URL    string `yaml:"-"`
+	// Format is "json" (default; signed like deliveries) or "slack".
+	Format string `yaml:"format"`
+	// SecretEnv names the signing secret for the json format.
+	SecretEnv string `yaml:"secret_env"`
+	Secret    string `yaml:"-"`
+	// DigestInterval is the most often a digest is sent (default 1m).
+	DigestInterval Duration `yaml:"digest_interval"`
+	// ReminderInterval re-sends a summary while anything still needs
+	// attention (default 24h; "0s" turns reminders off).
+	ReminderInterval *Duration `yaml:"reminder_interval"`
+}
+
+// Default alert intervals.
+const (
+	DefaultAlertDigestInterval   = time.Minute
+	DefaultAlertReminderInterval = 24 * time.Hour
+)
+
+// Reminder returns the reminder interval; 0 means off.
+func (a AlertsConfig) Reminder() time.Duration {
+	if a.ReminderInterval == nil {
+		return DefaultAlertReminderInterval
+	}
+	return time.Duration(*a.ReminderInterval)
 }
 
 // Duration is a time.Duration written in YAML as a Go duration string ("30s").
@@ -378,6 +431,12 @@ func (c *Config) applyDefaults() {
 			app.PayloadFormat = PayloadOriginal
 		}
 	}
+	if c.Alerts.Format == "" {
+		c.Alerts.Format = AlertFormatJSON
+	}
+	if c.Alerts.DigestInterval == 0 {
+		c.Alerts.DigestInterval = Duration(DefaultAlertDigestInterval)
+	}
 	d := &c.Delivery
 	if d.MaxAttempts == 0 {
 		d.MaxAttempts = DefaultMaxAttempts
@@ -444,6 +503,15 @@ func (c *Config) resolveSecrets(env LookupEnv) []error {
 			p.APIKey = get("providers.stripe.api_key_env", p.APIKeyEnv, p.ConfirmWithAPI)
 		}
 	}
+	if c.Server.AdminTokenEnv != "" {
+		c.Server.AdminToken = get("server.admin_token_env", c.Server.AdminTokenEnv, false)
+	}
+	if a := &c.Alerts; a.URLEnv != "" {
+		a.URL = get("alerts.url_env", a.URLEnv, true)
+		if a.Format != AlertFormatSlack {
+			a.Secret = get("alerts.secret_env", a.SecretEnv, true)
+		}
+	}
 	for _, id := range c.sortedAppIDs() {
 		app := c.Applications[id]
 		if app == nil {
@@ -485,6 +553,9 @@ func (c *Config) missingSecrets() []error {
 		if app := c.Applications[id]; app != nil && app.SigningSecret == "" {
 			errs = append(errs, fmt.Errorf("applications.%s: SigningSecret is required", id))
 		}
+	}
+	if a := c.Alerts; a.URL != "" && a.Format != AlertFormatSlack && a.Secret == "" {
+		errs = append(errs, errors.New("alerts: Secret is required for the json format"))
 	}
 	return errs
 }

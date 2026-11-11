@@ -24,6 +24,7 @@ import (
 
 	"github.com/khaleelhabeeb/relay/config"
 	"github.com/khaleelhabeeb/relay/internal/apierr"
+	"github.com/khaleelhabeeb/relay/internal/ops"
 	"github.com/khaleelhabeeb/relay/internal/reprocess"
 	"github.com/khaleelhabeeb/relay/internal/routing"
 	"github.com/khaleelhabeeb/relay/internal/store"
@@ -201,8 +202,9 @@ func normalize(req CreateRequest, providers []string) (string, error) {
 	}
 }
 
-// ErrInvalid wraps a validation failure in a CreateRequest.
-var ErrInvalid = errors.New("registration: invalid request")
+// ErrInvalid wraps a validation failure in a CreateRequest. It is the same
+// error operator actions return for invalid requests.
+var ErrInvalid = ops.ErrInvalid
 
 // Register claims req's identifier for app, the same way POST
 // /v1/registrations does. created is false when app already owned it. routed

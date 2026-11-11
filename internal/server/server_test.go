@@ -408,6 +408,32 @@ func TestAPIMounting(t *testing.T) {
 	}
 }
 
+func TestAdminMountedOnlyOnPrivateListener(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adminAPI := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) })
+	regAPI := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
+	get := func(h http.Handler, path string) int {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec.Code
+	}
+
+	shared := New(testConfig(), logger, Deps{Acceptor: &recorder{}, API: regAPI, Admin: adminAPI})
+	if get(shared.Handler(), "/v1/admin/stats") == http.StatusAccepted {
+		t.Fatal("the admin API must never be served on the public listener")
+	}
+
+	cfg := testConfig()
+	cfg.Server.APIListen = "127.0.0.1:0"
+	split := New(cfg, logger, Deps{Acceptor: &recorder{}, Admin: adminAPI})
+	if get(split.Handler(), "/v1/admin/stats") == http.StatusAccepted {
+		t.Fatal("the admin API must not be on the public listener")
+	}
+	if split.APIHandler() == nil || get(split.APIHandler(), "/v1/admin/stats") != http.StatusAccepted {
+		t.Fatal("the private listener must serve the admin API")
+	}
+}
+
 func TestReadiness(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	get := func(ready func(context.Context) error) int {
@@ -472,5 +498,25 @@ func TestWebhookConfirmWithAPI(t *testing.T) {
 	}
 	if a := rec.got[1]; a.ConfirmError == "" || !a.ConfirmNextAt.Equal(a.ReceivedAt) {
 		t.Errorf("deferred event: error %q, next %v (received %v)", a.ConfirmError, a.ConfirmNextAt, a.ReceivedAt)
+	}
+}
+
+// TestWebhookConfirmationOff: with confirm_with_api off nothing is checked,
+// so the event must not claim the provider confirmed it.
+func TestWebhookConfirmationOff(t *testing.T) {
+	rec := &recorder{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ad := paystack.Adapter{Secret: secret}
+	ts := httptest.NewServer(New(testConfig(), logger, Deps{Acceptor: rec, Adapters: []provider.Adapter{ad}}).Handler())
+	t.Cleanup(ts.Close)
+	body := []byte(`{"event":"charge.success","data":{"id":79,"reference":"APPA_3","status":"success"}}`)
+	if s, code := post(t, ts.URL, body, paystack.Sign(secret, body)); s != http.StatusOK {
+		t.Fatalf("webhook: %d %s", s, code)
+	}
+	if len(rec.got) != 1 || rec.got[0].Confirmation != "" {
+		t.Fatalf("confirmation = %q, want none (not checked)", rec.got[0].Confirmation)
+	}
+	if provider.ConfirmEnabled(ad) || !provider.ConfirmEnabled(paystack.Adapter{ConfirmWithAPI: true}) {
+		t.Error("ConfirmEnabled must follow ConfirmWithAPI")
 	}
 }

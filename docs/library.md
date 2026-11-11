@@ -191,6 +191,65 @@ Guidelines:
 `provider/paystack`, `provider/flutterwave`, `provider/monnify` and `provider/stripe` are complete examples. `relay_test.go` contains a
 small custom adapter with an end-to-end test.
 
+## Operating an embedded Relay
+
+Held events (`unresolved` or `ambiguous`), exhausted deliveries and failed confirmations can be
+found and resolved from Go. The methods return the record types of package `relay/admin`, the
+same records the admin API and the CLI's `--json` output use.
+
+```go
+st, err := r.Stats(ctx)                    // held events, confirmations, deliveries by status
+if st.Events.Unresolved+st.Events.Ambiguous > 0 {
+	page, _ := r.Events(ctx, admin.EventFilter{Status: admin.StatusUnresolved, Limit: 100})
+	for _, e := range page.Events {          // page.Next continues the list via EventFilter.After
+		detail, _ := r.Event(ctx, e.ID, false) // routing history, deliveries, attempts; no payload
+		_ = detail
+	}
+}
+
+// Assign an owner. The reason is kept in the event's routing history.
+res, err := r.Reroute(ctx, eventID, "billing", "legacy order, ticket 42")
+switch {
+case errors.Is(err, relay.ErrWrongState): // already has an owner, or its payload was purged
+case errors.Is(err, relay.ErrInvalid):    // unknown application or empty reason
+case errors.Is(err, relay.ErrNotFound):
+}
+_ = res.AwaitingConfirmation              // true: delivered once the provider API confirms it
+
+r.Dismiss(ctx, eventID, "test payment, not ours")  // close a held event without an owner
+r.Reprocess(ctx, admin.ReprocessRequest{})         // route unresolved events again after a config change
+r.RetryDelivery(ctx, deliveryID)                   // replay an exhausted delivery
+r.RetryConfirmation(ctx, eventID)                  // retry a failed provider API check
+```
+
+Unlike the CLI, these methods can reprocess events from providers you added with
+`WithProvider`.
+
+To be told when something needs attention, pass `WithAlertHandler`. It receives the same
+digests as `alerts.url`: new held events, exhausted deliveries, failed or rejected
+confirmations, conflicting duplicates and expired events, at most once per
+`cfg.Alerts.DigestInterval`, plus a reminder while anything still needs attention. Return an
+error and the same alerts are offered again at the next interval.
+
+```go
+r, err := relay.New(ctx, cfg, relay.WithAlertHandler(func(ctx context.Context, d admin.AlertDigest) error {
+	return pager.Notify(ctx, fmt.Sprintf("Relay: %d unresolved, %d exhausted",
+		d.Stats.Events.Unresolved, d.Stats.Deliveries.Exhausted))
+}))
+```
+
+To serve the HTTP admin API from your own server, set `cfg.Server.AdminToken` (at least 32
+bytes, its own value) and mount `r.AdminHandler()` on a private listener:
+
+```go
+private := http.NewServeMux()
+private.Handle("/v1/admin/", r.AdminHandler())
+go http.ListenAndServe("127.0.0.1:8081", private)
+```
+
+`ListenAndServe` serves it on `cfg.Server.APIListen` when that is set, never on the public
+listener.
+
 ## The `relay` CLI with an embedded Relay
 
 The operator commands (`relay events`, `relay deliveries`, `relay registrations`) work against
@@ -202,5 +261,5 @@ relay config validate -c relay.yaml --provider acme
 ```
 
 There's one limit. `relay events reprocess` re-reads stored events with the built-in adapters,
-so it can't reprocess events from a custom provider. Reprocess those from your program, or let
-in-process registration route them.
+so it can't reprocess events from a custom provider. Reprocess those from your program with
+`r.Reprocess`, or let in-process registration route them.

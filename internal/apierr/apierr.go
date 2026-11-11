@@ -21,6 +21,8 @@ const (
 	ServerBusy           = "server_busy"
 	NotConfirmed         = "not_confirmed"
 	ConfirmUnavailable   = "confirmation_unavailable"
+	InvalidState         = "invalid_state"
+	AdminDisabled        = "admin_disabled"
 )
 
 type body struct {

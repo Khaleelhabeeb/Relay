@@ -35,6 +35,9 @@ type transaction struct {
 	Currency string      `json:"currency"`
 }
 
+// ConfirmEnabled implements provider.ConfirmSwitch.
+func (a Adapter) ConfirmEnabled() bool { return a.ConfirmWithAPI }
+
 // Confirm implements provider.Confirmer. When ConfirmWithAPI is set it looks
 // the event's transaction up with GET /v3/transactions/:id/verify and
 // requires the id, tx_ref, status, amount and currency to match.
