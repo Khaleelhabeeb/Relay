@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -210,37 +211,122 @@ type PurgeResult struct {
 // before payloadCutoff, for events dismissed before it, and for matched
 // events whose deliveries were all delivered before it. Unresolved,
 // ambiguous, pending and exhausted events keep their payloads. Finished
-// attempt rows older than attemptCutoff are deleted.
+// attempt rows older than attemptCutoff are deleted. Work is done in short
+// batches, each its own transaction, so a purge never holds the writer
+// long; a run that fails partway keeps what it already did.
 func (s *Store) Purge(ctx context.Context, payloadCutoff, attemptCutoff time.Time) (PurgeResult, error) {
 	var r PurgeResult
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `UPDATE events SET raw_payload = NULL
-			WHERE raw_payload IS NOT NULL AND (
-				(routing_status = 'unsupported' AND received_at < ?)
-				OR (confirmation = 'rejected' AND received_at < ?)
-				OR (dismissed_at IS NOT NULL AND routing_status != 'matched' AND dismissed_at < ?)
-				OR (routing_status = 'matched'
-					AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = events.id
-						AND (d.status != 'delivered' OR d.delivered_at >= ?))
-					AND EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = events.id)))`,
-			ms(payloadCutoff), ms(payloadCutoff), ms(payloadCutoff), ms(payloadCutoff))
-		if err != nil {
-			return err
-		}
-		r.PayloadsCleared, _ = res.RowsAffected()
-		if _, err := tx.ExecContext(ctx, `UPDATE dedup_conflicts SET raw_payload = NULL
-			WHERE raw_payload IS NOT NULL AND received_at < ?`, ms(payloadCutoff)); err != nil {
-			return err
-		}
-		res, err = tx.ExecContext(ctx, `DELETE FROM delivery_attempts WHERE finished_at IS NOT NULL AND finished_at < ?`,
-			ms(attemptCutoff))
-		if err != nil {
-			return err
-		}
-		r.AttemptsDeleted, _ = res.RowsAffected()
-		return nil
-	})
+	var err error
+	if r.PayloadsCleared, err = s.purgePayloads(ctx, payloadCutoff); err != nil {
+		return r, err
+	}
+	if _, err = s.execBatches(ctx, `UPDATE dedup_conflicts SET raw_payload = NULL WHERE id IN (
+		SELECT id FROM dedup_conflicts WHERE raw_payload IS NOT NULL AND received_at < ? LIMIT ?)`,
+		ms(payloadCutoff)); err != nil {
+		return r, err
+	}
+	r.AttemptsDeleted, err = s.execBatches(ctx, `DELETE FROM delivery_attempts WHERE id IN (
+		SELECT id FROM delivery_attempts WHERE finished_at IS NOT NULL AND finished_at < ? ORDER BY finished_at LIMIT ?)`,
+		ms(attemptCutoff))
 	return r, err
+}
+
+// purgeBatch bounds the rows one retention transaction reads or changes.
+// The database has a single writer, so webhooks waiting to commit get it
+// between batches instead of behind one long purge.
+const purgeBatch = 500
+
+// purgeable is true for an event (already known to hold a payload received
+// before the cutoff, bound to every ?) whose payload is no longer needed:
+// unsupported, rejected by the provider API, dismissed before the cutoff,
+// or matched with every delivery delivered before the cutoff. received_at
+// < cutoff is implied for the last two, since dismissal and delivery
+// happen after receipt.
+const purgeable = `(routing_status = 'unsupported'
+	OR confirmation = 'rejected'
+	OR (dismissed_at IS NOT NULL AND routing_status != 'matched' AND dismissed_at < ?)
+	OR (routing_status = 'matched'
+		AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = events.id
+			AND (d.status != 'delivered' OR d.delivered_at >= ?))
+		AND EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = events.id)))`
+
+// purgePayloads clears payloads that retention no longer needs. It walks
+// events still holding a payload, oldest first, over the
+// events_payload_retained index in batches of purgeBatch, each in its own
+// short transaction; already-cleared events are never visited again.
+func (s *Store) purgePayloads(ctx context.Context, cutoff time.Time) (int64, error) {
+	var (
+		total   int64
+		afterAt = int64(math.MinInt64)
+		afterID string
+	)
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		scanned := 0
+		err := s.withTx(ctx, func(tx *sql.Tx) error {
+			rows, err := tx.QueryContext(ctx, `SELECT id, received_at, `+purgeable+` FROM events
+				WHERE raw_payload IS NOT NULL AND received_at < ? AND (received_at, id) > (?, ?)
+				ORDER BY received_at, id LIMIT ?`,
+				ms(cutoff), ms(cutoff), ms(cutoff), afterAt, afterID, purgeBatch)
+			if err != nil {
+				return err
+			}
+			var clear []string
+			for rows.Next() {
+				var (
+					id  string
+					at  int64
+					old bool
+				)
+				if err := rows.Scan(&id, &at, &old); err != nil {
+					rows.Close()
+					return err
+				}
+				scanned++
+				afterAt, afterID = at, id
+				if old {
+					clear = append(clear, id)
+				}
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			for _, id := range clear {
+				if _, err := tx.ExecContext(ctx, `UPDATE events SET raw_payload = NULL WHERE id = ?`, id); err != nil {
+					return err
+				}
+			}
+			total += int64(len(clear))
+			return nil
+		})
+		if err != nil || scanned < purgeBatch {
+			return total, err
+		}
+	}
+}
+
+// execBatches runs q, whose last parameter is a row limit, with purgeBatch
+// until it affects fewer rows than that. Each run is its own transaction.
+func (s *Store) execBatches(ctx context.Context, q string, args ...any) (int64, error) {
+	args = append(append([]any(nil), args...), purgeBatch)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		res, err := s.w.ExecContext(ctx, q, args...)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+		if n < purgeBatch {
+			return total, nil
+		}
+	}
 }
 
 // Stats are point-in-time gauges for metrics.

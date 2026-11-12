@@ -253,10 +253,15 @@ type MatchConfig struct {
 }
 
 type DeliveryConfig struct {
-	MaxAttempts    int        `yaml:"max_attempts"`
-	TimeoutSeconds int        `yaml:"timeout_seconds"`
-	WorkerCount    int        `yaml:"worker_count"`
-	RetrySchedule  []Duration `yaml:"retry_schedule"`
+	MaxAttempts    int `yaml:"max_attempts"`
+	TimeoutSeconds int `yaml:"timeout_seconds"`
+	WorkerCount    int `yaml:"worker_count"`
+	// MaxConcurrentPerApplication caps the workers one application can
+	// occupy, so a slow or unreachable application cannot hold up
+	// deliveries to the others. Default: worker_count with one
+	// application, otherwise half of it (rounded up).
+	MaxConcurrentPerApplication int        `yaml:"max_concurrent_per_application"`
+	RetrySchedule               []Duration `yaml:"retry_schedule"`
 	// AllowInsecureLocal permits http:// and loopback/private destinations.
 	// Development only.
 	AllowInsecureLocal bool `yaml:"allow_insecure_local"`
@@ -446,6 +451,12 @@ func (c *Config) applyDefaults() {
 	}
 	if d.WorkerCount == 0 {
 		d.WorkerCount = DefaultWorkerCount
+	}
+	if d.MaxConcurrentPerApplication == 0 {
+		d.MaxConcurrentPerApplication = d.WorkerCount
+		if len(c.Applications) > 1 {
+			d.MaxConcurrentPerApplication = (d.WorkerCount + 1) / 2
+		}
 	}
 	if len(d.RetrySchedule) == 0 {
 		d.RetrySchedule = append([]Duration(nil), DefaultRetrySchedule...)

@@ -591,6 +591,7 @@ delivery:
   max_attempts: 10              # per cycle; a manual retry starts a new cycle (1–50)
   timeout_seconds: 10           # per attempt (1–120)
   worker_count: 8               # concurrent deliveries (1–256)
+  max_concurrent_per_application: 4  # workers one application may hold; default: all of them with one application, else half
   retry_schedule: [0s, 30s, 2m, 10m, 30m, 1h, 2h, 4h, 8h, 8h]  # delay before attempt N; last repeats; ±20% jitter
   allow_insecure_local: false   # DEVELOPMENT ONLY: allow http:// and private/loopback destinations
 

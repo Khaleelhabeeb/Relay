@@ -168,6 +168,24 @@ First release: a self-hosted Paystack webhook router.
 - **Packaging.** Static binaries (linux and darwin, amd64 and arm64), a distroless non-root
   Docker image, a docker-compose demo, and docs.
 
+### Changed
+- **One slow application no longer delays deliveries to the others.** New
+  `delivery.max_concurrent_per_application` caps how many workers one application can occupy.
+  It defaults to all of `worker_count` with one application, otherwise half of it (rounded up).
+  Before, an application whose endpoint hung could hold every worker for the full timeout while
+  deliveries to healthy applications waited.
+- **Claiming deliveries stays fast with a large backlog.** Each application's due deliveries are
+  read in order from an index, and payloads are loaded only for the deliveries claimed. Before,
+  every claim sorted the whole due backlog, payloads included, while holding the database
+  writer (about 0.4 s per claim with 200k due deliveries; now under 1 ms).
+- **Retention no longer blocks webhooks.** The purge runs in batches of 500 rows, each its own
+  short transaction, over an index of events that still hold a payload. Before, one transaction
+  scanned every event while holding the single writer, which could stall ingest for seconds or
+  longer on large databases.
+- Migration `0007` adds the two indexes (`events_payload_retained`,
+  `deliveries_pending_app`). Building them on a large existing database takes one pass over
+  `events` and `deliveries` at startup.
+
 ### Fixed
 - Events were recorded as `confirmation: confirmed` when `confirm_with_api` was off, although
   nothing was checked. They are now `none`. Adapters can implement the new optional

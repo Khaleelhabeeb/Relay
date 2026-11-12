@@ -39,13 +39,17 @@ type App struct {
 // Dispatcher claims due deliveries from the store and sends them with a
 // bounded worker pool. Run it once per process.
 type Dispatcher struct {
-	Store         *store.Store
-	Apps          map[string]App
-	Client        *http.Client
-	Logger        *slog.Logger
-	MaxAttempts   int
-	Timeout       time.Duration
-	Workers       int
+	Store       *store.Store
+	Apps        map[string]App
+	Client      *http.Client
+	Logger      *slog.Logger
+	MaxAttempts int
+	Timeout     time.Duration
+	Workers     int
+	// MaxPerApp caps concurrent attempts to one application (0: no cap),
+	// so a slow or unreachable application cannot occupy every worker
+	// while deliveries to the others wait.
+	MaxPerApp     int
 	RetryDelay    func(attempt int) time.Duration // delay before the given attempt (1-based)
 	PollInterval  time.Duration
 	ShutdownGrace time.Duration // how long in-flight attempts may finish after shutdown starts
@@ -57,6 +61,9 @@ type Dispatcher struct {
 	once  sync.Once
 	owner string
 	nudge chan struct{}
+
+	mu       sync.Mutex
+	inFlight map[string]int // attempts running per application
 }
 
 // NewDispatcher builds a dispatcher from configuration.
@@ -78,6 +85,7 @@ func NewDispatcher(cfg *config.Config, st *store.Store, logger *slog.Logger, use
 		MaxAttempts:   cfg.Delivery.MaxAttempts,
 		Timeout:       cfg.Delivery.Timeout(),
 		Workers:       cfg.Delivery.WorkerCount,
+		MaxPerApp:     cfg.Delivery.MaxConcurrentPerApplication,
 		RetryDelay:    cfg.Delivery.RetryDelay,
 		ShutdownGrace: cfg.Delivery.Timeout() + 5*time.Second,
 		UserAgent:     userAgent,
@@ -88,6 +96,7 @@ func (d *Dispatcher) init() {
 	d.once.Do(func() {
 		d.owner = ids.New("wrk")
 		d.nudge = make(chan struct{}, 1)
+		d.inFlight = map[string]int{}
 		if d.PollInterval <= 0 {
 			d.PollInterval = defaultPollInterval
 		}
@@ -145,16 +154,18 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	for ctx.Err() == nil {
 		if free := d.Workers - len(slots); free > 0 {
 			now := d.now()
-			claimed, err := d.Store.ClaimDue(ctx, d.owner, now, now.Add(d.Timeout+leaseMargin), free)
+			claimed, err := d.Store.ClaimDueFair(ctx, d.owner, now, now.Add(d.Timeout+leaseMargin), free, d.capacity())
 			if err != nil && ctx.Err() == nil {
 				d.Logger.Error("claiming deliveries failed", "error", err)
 			}
 			for _, c := range claimed {
 				slots <- struct{}{}
+				d.track(c.ApplicationID, 1)
 				wg.Add(1)
 				go func(c store.ClaimedDelivery) {
 					defer wg.Done()
 					defer func() {
+						d.track(c.ApplicationID, -1)
 						<-slots
 						select {
 						case freed <- struct{}{}:
@@ -194,6 +205,27 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		d.Logger.Warn("released unfinished deliveries", "count", n)
 	}
 	return nil
+}
+
+// capacity returns how many more attempts each application may start now,
+// or nil when there is no per-application cap.
+func (d *Dispatcher) capacity() func(app string) int {
+	if d.MaxPerApp <= 0 {
+		return nil
+	}
+	return func(app string) int {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.MaxPerApp - d.inFlight[app]
+	}
+}
+
+func (d *Dispatcher) track(app string, delta int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.inFlight[app] += delta; d.inFlight[app] <= 0 {
+		delete(d.inFlight, app)
+	}
 }
 
 // attempt sends one claimed delivery and records the outcome.

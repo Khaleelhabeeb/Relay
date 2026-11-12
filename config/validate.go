@@ -234,6 +234,9 @@ func (c *Config) validate(extraProviders []string) []error {
 	if d.WorkerCount < 1 || d.WorkerCount > 256 {
 		fail("delivery.worker_count: must be between 1 and 256")
 	}
+	if d.MaxConcurrentPerApplication < 1 || d.MaxConcurrentPerApplication > d.WorkerCount {
+		fail("delivery.max_concurrent_per_application: must be between 1 and worker_count (%d)", d.WorkerCount)
+	}
 	for i, s := range d.RetrySchedule {
 		if s < 0 || time.Duration(s) > 7*24*time.Hour {
 			fail("delivery.retry_schedule[%d]: must be between 0s and 168h", i)
