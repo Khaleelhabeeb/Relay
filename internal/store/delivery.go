@@ -1,9 +1,11 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,43 +32,107 @@ type ClaimedDelivery struct {
 // Counting at claim time means an attempt interrupted by a crash still
 // counts toward max_attempts.
 func (s *Store) ClaimDue(ctx context.Context, owner string, now, leaseUntil time.Time, limit int) ([]ClaimedDelivery, error) {
+	return s.ClaimDueFair(ctx, owner, now, leaseUntil, limit, nil)
+}
+
+// maxClaimApps bounds how many distinct applications one claim looks at.
+const maxClaimApps = 1000
+
+type claimCandidate struct {
+	id, eventID, app string
+	attempts, base   int
+	order            int64 // lease_until for expired leases, else next_attempt_at
+}
+
+// ClaimDueFair is ClaimDue with a per-application budget: capacity(app)
+// is how many more deliveries to app may be claimed now (nil: no limit).
+// An application at its budget is skipped, so its backlog never holds up
+// another's.
+//
+// Expired leases are claimed first, then due pending deliveries oldest
+// first across applications. Each application's due work is read in order
+// from the deliveries_pending_app index, so a claim costs about
+// (applications × limit) index reads however large the backlog is, and
+// payloads are read only for the deliveries actually claimed.
+func (s *Store) ClaimDueFair(ctx context.Context, owner string, now, leaseUntil time.Time, limit int, capacity func(app string) int) ([]ClaimedDelivery, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
+	room := map[string]int{}
+	roomFor := func(app string) int {
+		if n, ok := room[app]; ok {
+			return n
+		}
+		n := limit
+		if capacity != nil {
+			n = min(max(capacity(app), 0), limit)
+		}
+		room[app] = n
+		return n
+	}
+
 	var out []ClaimedDelivery
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT d.id, d.event_id, d.application_id, d.attempt_count, d.retry_base,
-				e.provider, e.event_type, e.raw_payload, e.received_at
-			FROM deliveries d JOIN events e ON e.id = d.event_id
-			WHERE (d.status = 'pending' AND d.next_attempt_at <= ?)
-			   OR (d.status = 'in_flight' AND d.lease_until < ?)
-			ORDER BY d.next_attempt_at, d.id
-			LIMIT ?`, ms(now), ms(now), limit)
+		var picked []claimCandidate
+		take := func(cands []claimCandidate) {
+			for _, c := range cands {
+				if len(picked) == limit {
+					return
+				}
+				if roomFor(c.app) > 0 {
+					room[c.app]--
+					picked = append(picked, c)
+				}
+			}
+		}
+
+		expired, err := queryCandidates(ctx, tx, `SELECT id, event_id, application_id, attempt_count, retry_base, lease_until
+			FROM deliveries WHERE status = 'in_flight' AND lease_until < ? ORDER BY lease_until, id LIMIT ?`, ms(now), limit)
 		if err != nil {
 			return err
 		}
-		for rows.Next() {
-			var (
-				c        ClaimedDelivery
-				attempts int
-				base     int
-				received int64
-			)
-			if err := rows.Scan(&c.ID, &c.EventID, &c.ApplicationID, &attempts, &base, &c.Provider, &c.EventType, &c.RawPayload, &received); err != nil {
-				rows.Close()
+		take(expired)
+
+		if len(picked) < limit {
+			var due []claimCandidate
+			app := ""
+			for range maxClaimApps {
+				err := tx.QueryRowContext(ctx, `SELECT application_id FROM deliveries
+					WHERE status = 'pending' AND application_id > ? ORDER BY application_id LIMIT 1`, app).Scan(&app)
+				if errors.Is(err, sql.ErrNoRows) {
+					break
+				}
+				if err != nil {
+					return err
+				}
+				n := roomFor(app)
+				if n == 0 {
+					continue
+				}
+				cands, err := queryCandidates(ctx, tx, `SELECT id, event_id, application_id, attempt_count, retry_base, next_attempt_at
+					FROM deliveries WHERE status = 'pending' AND application_id = ? AND next_attempt_at <= ?
+					ORDER BY next_attempt_at, id LIMIT ?`, app, ms(now), n)
+				if err != nil {
+					return err
+				}
+				due = append(due, cands...)
+			}
+			slices.SortFunc(due, func(a, b claimCandidate) int {
+				return cmp.Or(cmp.Compare(a.order, b.order), strings.Compare(a.id, b.id))
+			})
+			take(due)
+		}
+
+		for _, p := range picked {
+			c := ClaimedDelivery{ID: p.id, EventID: p.eventID, ApplicationID: p.app,
+				AttemptNo: p.attempts + 1, AttemptID: ids.New(ids.Attempt)}
+			c.CycleAttempt = c.AttemptNo - p.base
+			var received int64
+			if err := tx.QueryRowContext(ctx, `SELECT provider, event_type, raw_payload, received_at FROM events WHERE id = ?`,
+				p.eventID).Scan(&c.Provider, &c.EventType, &c.RawPayload, &received); err != nil {
 				return err
 			}
-			c.AttemptNo = attempts + 1
-			c.CycleAttempt = c.AttemptNo - base
-			c.AttemptID = ids.New(ids.Attempt)
 			c.ReceivedAt = fromMS(received)
-			out = append(out, c)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		for _, c := range out {
 			if _, err := tx.ExecContext(ctx, `UPDATE deliveries SET status = 'in_flight', attempt_count = ?,
 				lease_owner = ?, lease_until = ?, updated_at = ? WHERE id = ?`,
 				c.AttemptNo, owner, ms(leaseUntil), ms(now), c.ID); err != nil {
@@ -76,6 +142,7 @@ func (s *Store) ClaimDue(ctx context.Context, owner string, now, leaseUntil time
 				VALUES (?, ?, ?, ?)`, c.AttemptID, c.ID, c.AttemptNo, ms(now)); err != nil {
 				return err
 			}
+			out = append(out, c)
 		}
 		return nil
 	})
@@ -83,6 +150,23 @@ func (s *Store) ClaimDue(ctx context.Context, owner string, now, leaseUntil time
 		return nil, err
 	}
 	return out, nil
+}
+
+func queryCandidates(ctx context.Context, tx *sql.Tx, q string, args ...any) ([]claimCandidate, error) {
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []claimCandidate
+	for rows.Next() {
+		var c claimCandidate
+		if err := rows.Scan(&c.id, &c.eventID, &c.app, &c.attempts, &c.base, &c.order); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // AttemptResult is the outcome of one delivery attempt.

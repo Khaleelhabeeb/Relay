@@ -96,6 +96,10 @@ func TestDefaults(t *testing.T) {
 		c.Applications["app_a"].PayloadFormat != PayloadOriginal || c.Retention.PayloadDays != 90 {
 		t.Fatalf("defaults not applied: %+v", c)
 	}
+	if c.Delivery.MaxConcurrentPerApplication != 4 {
+		t.Errorf("max_concurrent_per_application default with two applications = %d, want half of 8",
+			c.Delivery.MaxConcurrentPerApplication)
+	}
 	if got := c.Delivery.RetryDelay(2); got != 30*time.Second {
 		t.Errorf("RetryDelay(2) = %v", got)
 	}
@@ -157,6 +161,7 @@ func TestValidationErrors(t *testing.T) {
 		{"missing dsn", strings.Replace(base, "storage: {dsn: ./relay.db}", "", 1), nil, "storage.dsn"},
 		{"bad retry duration", base + "delivery: {retry_schedule: [10parsecs]}\n", nil, "unknown unit"},
 		{"max attempts range", base + "delivery: {max_attempts: 500}\n", nil, "max_attempts"},
+		{"per-application cap above workers", base + "delivery: {worker_count: 4, max_concurrent_per_application: 5}\n", nil, "max_concurrent_per_application"},
 		{"bad trusted proxy", base + "server: {trusted_proxies: [not-an-ip]}\n", nil, "trusted_proxies"},
 		{"api_listen same as listen", base + "server: {listen: ':8080', api_listen: ':8080'}\n", nil, "api_listen"},
 		{"alerts url unset", base + "alerts: {url_env: RELAY_ALERTS_URL, secret_env: RELAY_ALERTS_SECRET}\n", nil, "RELAY_ALERTS_URL is not set"},
@@ -313,5 +318,16 @@ func TestParsePrefixes(t *testing.T) {
 		if got[i].String() != want[i] {
 			t.Errorf("[%d] = %s, want %s", i, got[i], want[i])
 		}
+	}
+}
+
+func TestPerApplicationCapDefaultsToAllWorkersForOneApplication(t *testing.T) {
+	one := base[:strings.Index(base, "  app_b:")]
+	c, err := loadYAML(t, one+"delivery: {worker_count: 6}\n", testEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Delivery.MaxConcurrentPerApplication != 6 {
+		t.Fatalf("one application: cap = %d, want worker_count", c.Delivery.MaxConcurrentPerApplication)
 	}
 }
