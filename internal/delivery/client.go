@@ -23,7 +23,9 @@ var ErrBlockedDestination = errors.New("delivery: destination address not allowe
 // time, so a hostname that resolves (or re-resolves, as in DNS rebinding)
 // to a private, loopback, link-local or metadata address is refused.
 func NewHTTPClient(allowInsecure bool) *http.Client {
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	// A short connect timeout: an unreachable endpoint fails fast instead
+	// of holding a worker for the whole attempt timeout.
+	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
 	if !allowInsecure {
 		dialer.Control = guardControl
 	}

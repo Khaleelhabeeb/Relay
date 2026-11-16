@@ -408,3 +408,33 @@ func TestUnknownApplicationFails(t *testing.T) {
 		t.Fatalf("attempts = %+v", a)
 	}
 }
+
+func TestSlowApplicationDoesNotBlockOthers(t *testing.T) {
+	release := make(chan struct{})
+	var hung atomic.Int32
+	appA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hung.Add(1)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(appA.Close)
+	t.Cleanup(func() { close(release) })
+	appB := okServer(t, nil)
+
+	h := newHarness(t, appA.URL, appB.URL)
+	h.disp.Workers, h.disp.MaxPerApp = 4, 2
+	h.disp.Timeout = 30 * time.Second // app A holds its workers for the whole test
+
+	for i := range 6 {
+		h.ingestCharge(100+i, fmt.Sprintf("APPA_%d", i), "")
+	}
+	b := h.ingestCharge(200, "T200", "app_b")
+	h.start()
+
+	h.waitStatus(b.ID, store.DeliveryDelivered)
+	if n := hung.Load(); n > 2 {
+		t.Fatalf("app_a has %d concurrent attempts, want at most MaxPerApp (2)", n)
+	}
+}

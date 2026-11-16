@@ -22,6 +22,7 @@ type Metrics struct {
 	attempts        *prometheus.CounterVec
 	attemptDuration prometheus.Histogram
 	exhausted       *prometheus.CounterVec
+	circuitOpen     *prometheus.GaugeVec
 	confirmations   *prometheus.CounterVec
 	alerts          *prometheus.CounterVec
 }
@@ -57,6 +58,10 @@ func New(st *store.Store) *Metrics {
 			Name: "relay_deliveries_exhausted_total",
 			Help: "Deliveries that used their whole retry budget and need operator replay.",
 		}, []string{"application"}),
+		circuitOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "relay_delivery_circuit_open",
+			Help: "1 while deliveries to an application are paused because its endpoint keeps failing (circuit breaker open).",
+		}, []string{"application"}),
 		confirmations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "relay_confirmations_total",
 			Help: "Provider API confirmations finished in the background, by provider and result (deferred: the API failed at ingest and the event waits; confirmed; rejected; retry; failed: retry budget spent).",
@@ -66,7 +71,7 @@ func New(st *store.Store) *Metrics {
 			Help: "Operator alert digests by sink and result (sent, failed).",
 		}, []string{"sink", "result"}),
 	}
-	m.registry.MustRegister(m.webhooks, m.acceptLatency, m.routed, m.attempts, m.attemptDuration, m.exhausted, m.confirmations, m.alerts,
+	m.registry.MustRegister(m.webhooks, m.acceptLatency, m.routed, m.attempts, m.attemptDuration, m.exhausted, m.circuitOpen, m.confirmations, m.alerts,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	if st != nil {
 		m.registry.MustRegister(&storeCollector{store: st})
@@ -130,6 +135,18 @@ func (m *Metrics) Attempt(application, errorCode string, d time.Duration, exhaus
 	if exhausted {
 		m.exhausted.WithLabelValues(application).Inc()
 	}
+}
+
+// CircuitOpen records whether application's delivery circuit is open.
+func (m *Metrics) CircuitOpen(application string, open bool) {
+	if m == nil {
+		return
+	}
+	v := 0.0
+	if open {
+		v = 1
+	}
+	m.circuitOpen.WithLabelValues(application).Set(v)
 }
 
 // storeCollector reads gauges from the database at scrape time.
