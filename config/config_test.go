@@ -100,6 +100,10 @@ func TestDefaults(t *testing.T) {
 		t.Errorf("max_concurrent_per_application default with two applications = %d, want half of 8",
 			c.Delivery.MaxConcurrentPerApplication)
 	}
+	if b := c.Delivery.CircuitBreaker; b.Disabled || b.FailureThreshold != 5 ||
+		time.Duration(b.Cooldown) != 30*time.Second || time.Duration(b.MaxCooldown) != 10*time.Minute {
+		t.Errorf("circuit_breaker defaults not applied: %+v", b)
+	}
 	if got := c.Delivery.RetryDelay(2); got != 30*time.Second {
 		t.Errorf("RetryDelay(2) = %v", got)
 	}
@@ -162,6 +166,9 @@ func TestValidationErrors(t *testing.T) {
 		{"bad retry duration", base + "delivery: {retry_schedule: [10parsecs]}\n", nil, "unknown unit"},
 		{"max attempts range", base + "delivery: {max_attempts: 500}\n", nil, "max_attempts"},
 		{"per-application cap above workers", base + "delivery: {worker_count: 4, max_concurrent_per_application: 5}\n", nil, "max_concurrent_per_application"},
+		{"breaker threshold range", base + "delivery: {circuit_breaker: {failure_threshold: 1000}}\n", nil, "failure_threshold"},
+		{"breaker cooldown too short", base + "delivery: {circuit_breaker: {cooldown: 10ms}}\n", nil, "circuit_breaker.cooldown"},
+		{"breaker max below cooldown", base + "delivery: {circuit_breaker: {cooldown: 5m, max_cooldown: 1m}}\n", nil, "max_cooldown"},
 		{"bad trusted proxy", base + "server: {trusted_proxies: [not-an-ip]}\n", nil, "trusted_proxies"},
 		{"api_listen same as listen", base + "server: {listen: ':8080', api_listen: ':8080'}\n", nil, "api_listen"},
 		{"alerts url unset", base + "alerts: {url_env: RELAY_ALERTS_URL, secret_env: RELAY_ALERTS_SECRET}\n", nil, "RELAY_ALERTS_URL is not set"},
@@ -329,5 +336,15 @@ func TestPerApplicationCapDefaultsToAllWorkersForOneApplication(t *testing.T) {
 	}
 	if c.Delivery.MaxConcurrentPerApplication != 6 {
 		t.Fatalf("one application: cap = %d, want worker_count", c.Delivery.MaxConcurrentPerApplication)
+	}
+}
+
+func TestCircuitBreakerCanBeDisabled(t *testing.T) {
+	c, err := loadYAML(t, base+"delivery: {circuit_breaker: {disabled: true}}\n", testEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := c.Delivery.CircuitBreaker; !b.Disabled || b.FailureThreshold != 0 {
+		t.Fatalf("disabled breaker got defaults: %+v", b)
 	}
 }

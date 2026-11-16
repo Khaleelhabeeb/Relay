@@ -49,7 +49,10 @@ type Dispatcher struct {
 	// MaxPerApp caps concurrent attempts to one application (0: no cap),
 	// so a slow or unreachable application cannot occupy every worker
 	// while deliveries to the others wait.
-	MaxPerApp     int
+	MaxPerApp int
+	// Breaker pauses deliveries to an application whose endpoint keeps
+	// failing (zero value: off). See BreakerSettings.
+	Breaker       BreakerSettings
 	RetryDelay    func(attempt int) time.Duration // delay before the given attempt (1-based)
 	PollInterval  time.Duration
 	ShutdownGrace time.Duration // how long in-flight attempts may finish after shutdown starts
@@ -63,7 +66,8 @@ type Dispatcher struct {
 	nudge chan struct{}
 
 	mu       sync.Mutex
-	inFlight map[string]int // attempts running per application
+	inFlight map[string]int      // attempts running per application
+	circuits map[string]*circuit // breaker state per application
 }
 
 // NewDispatcher builds a dispatcher from configuration.
@@ -86,6 +90,7 @@ func NewDispatcher(cfg *config.Config, st *store.Store, logger *slog.Logger, use
 		Timeout:       cfg.Delivery.Timeout(),
 		Workers:       cfg.Delivery.WorkerCount,
 		MaxPerApp:     cfg.Delivery.MaxConcurrentPerApplication,
+		Breaker:       breakerFromConfig(cfg.Delivery.CircuitBreaker),
 		RetryDelay:    cfg.Delivery.RetryDelay,
 		ShutdownGrace: cfg.Delivery.Timeout() + 5*time.Second,
 		UserAgent:     userAgent,
@@ -97,6 +102,7 @@ func (d *Dispatcher) init() {
 		d.owner = ids.New("wrk")
 		d.nudge = make(chan struct{}, 1)
 		d.inFlight = map[string]int{}
+		d.circuits = map[string]*circuit{}
 		if d.PollInterval <= 0 {
 			d.PollInterval = defaultPollInterval
 		}
@@ -154,13 +160,13 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	for ctx.Err() == nil {
 		if free := d.Workers - len(slots); free > 0 {
 			now := d.now()
-			claimed, err := d.Store.ClaimDueFair(ctx, d.owner, now, now.Add(d.Timeout+leaseMargin), free, d.capacity())
+			claimed, err := d.Store.ClaimDueFair(ctx, d.owner, now, now.Add(d.Timeout+leaseMargin), free, d.capacity(now))
 			if err != nil && ctx.Err() == nil {
 				d.Logger.Error("claiming deliveries failed", "error", err)
 			}
 			for _, c := range claimed {
 				slots <- struct{}{}
-				d.track(c.ApplicationID, 1)
+				d.started(c, now)
 				wg.Add(1)
 				go func(c store.ClaimedDelivery) {
 					defer wg.Done()
@@ -208,16 +214,29 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 }
 
 // capacity returns how many more attempts each application may start now,
-// or nil when there is no per-application cap.
-func (d *Dispatcher) capacity() func(app string) int {
-	if d.MaxPerApp <= 0 {
+// or nil when there is no per-application cap and no circuit breaker.
+func (d *Dispatcher) capacity(now time.Time) func(app string) int {
+	if d.MaxPerApp <= 0 && d.Breaker.Threshold <= 0 {
 		return nil
 	}
 	return func(app string) int {
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		return d.MaxPerApp - d.inFlight[app]
+		n := d.Workers
+		if d.MaxPerApp > 0 {
+			n = d.MaxPerApp - d.inFlight[app]
+		}
+		return d.breakerCapacity(app, n, now)
 	}
+}
+
+// started counts a claimed attempt as running, and as its application's
+// probe if the circuit is open.
+func (d *Dispatcher) started(c store.ClaimedDelivery, now time.Time) {
+	d.track(c.ApplicationID, 1)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.markProbe(c.ApplicationID, c.ID, now)
 }
 
 func (d *Dispatcher) track(app string, delta int) {
@@ -226,6 +245,13 @@ func (d *Dispatcher) track(app string, delta int) {
 	if d.inFlight[app] += delta; d.inFlight[app] <= 0 {
 		delete(d.inFlight, app)
 	}
+}
+
+func breakerFromConfig(c config.CircuitBreakerConfig) BreakerSettings {
+	if c.Disabled {
+		return BreakerSettings{}
+	}
+	return BreakerSettings{Threshold: c.FailureThreshold, Cooldown: time.Duration(c.Cooldown), MaxCooldown: time.Duration(c.MaxCooldown)}
 }
 
 // attempt sends one claimed delivery and records the outcome.
@@ -246,6 +272,18 @@ func (d *Dispatcher) attempt(workCtx context.Context, c store.ClaimedDelivery) {
 
 	r.FinishedAt = d.now()
 	r.Duration = r.FinishedAt.Sub(start)
+	switch ev, cooldown := d.recordHealth(c.ApplicationID, c.ID, healthOf(r.HTTPStatus, r.ErrorCode), r.FinishedAt); ev {
+	case breakerOpened:
+		d.Metrics.CircuitOpen(c.ApplicationID, true)
+		d.Logger.Warn("application endpoint keeps failing; pausing its deliveries", "application", c.ApplicationID,
+			"consecutive_failures", d.Breaker.Threshold, "error_code", r.ErrorCode, "probe_in", cooldown)
+	case breakerReopened:
+		d.Logger.Warn("probe delivery failed; application deliveries stay paused", "application", c.ApplicationID,
+			"error_code", r.ErrorCode, "probe_in", cooldown)
+	case breakerClosed:
+		d.Metrics.CircuitOpen(c.ApplicationID, false)
+		d.Logger.Info("probe delivery succeeded; resuming application deliveries", "application", c.ApplicationID)
+	}
 	switch {
 	case r.ErrorCode == "":
 		r.Status = store.DeliveryDelivered

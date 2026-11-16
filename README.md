@@ -352,6 +352,7 @@ X-Relay-Signature: v1=fe8e97a7670f414a34ec2115f47bcda1ff597e880bfe6c5edf3b823ff2
 | **Success** | Any `2xx` response |
 | **Retried** | Timeouts, connection errors, non-`2xx` responses and redirects (never followed). By default 10 attempts over about 24 hours: immediately, then after 30s, 2m, 10m, 30m, 1h, 2h, 4h, 8h and 8h, each ±20%. |
 | **After the last attempt** | The delivery is marked `exhausted`. Replay it with `relay deliveries retry`. |
+| **Endpoint down** | After 5 consecutive timeouts, connection errors, `5xx` or `429` responses, Relay pauses that application (`delivery.circuit_breaker`): its deliveries wait without using attempts, and the workers serve other applications. Every 30s (doubling to 10m while it stays down) one probe delivery is sent. When a probe succeeds, the backlog resumes. |
 | **Timeout per attempt** | `delivery.timeout_seconds`, 10 by default |
 
 ### Verifying the signature
@@ -691,6 +692,11 @@ delivery:
   worker_count: 8               # concurrent deliveries (1–256)
   max_concurrent_per_application: 4  # workers one application may hold; default: all of them with one application, else half
   retry_schedule: [0s, 30s, 2m, 10m, 30m, 1h, 2h, 4h, 8h, 8h]  # delay before attempt N; last repeats; ±20% jitter
+  circuit_breaker:              # pause an application whose endpoint keeps failing, so it can't tie up workers
+    failure_threshold: 5        # consecutive timeouts, connection errors, 5xx or 429 that open it (1–100)
+    cooldown: 30s               # then one probe delivery; a failed probe doubles this (1s–1h)
+    max_cooldown: 10m           # longest wait between probes (cooldown–24h)
+    disabled: false
   allow_insecure_local: false   # DEVELOPMENT ONLY: allow http:// and private/loopback destinations
 
 retention:

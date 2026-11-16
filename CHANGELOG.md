@@ -169,6 +169,14 @@ First release: a self-hosted Paystack webhook router.
   Docker image, a docker-compose demo, and docs.
 
 ### Changed
+- **A down application no longer starves the others.** New `delivery.circuit_breaker`: after 5
+  consecutive timeouts, connection errors, `5xx` or `429` responses, Relay stops sending to that
+  application. Its deliveries wait without using their retry attempts. Every 30s, doubling up to
+  10m while the application stays down, one probe delivery is sent, and a success resumes the
+  rest. Before, `max_concurrent_per_application` alone let two unreachable applications hold
+  every worker for the full timeout on each retry. While paused, deliveries are not exhausted,
+  so watch the new `relay_delivery_circuit_open{application}` gauge. The connect timeout for
+  deliveries also drops from 10s to 5s, so an unreachable host frees its worker sooner.
 - **One slow application no longer delays deliveries to the others.** New
   `delivery.max_concurrent_per_application` caps how many workers one application can occupy.
   It defaults to all of `worker_count` with one application, otherwise half of it (rounded up).

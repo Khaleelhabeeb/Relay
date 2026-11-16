@@ -33,8 +33,12 @@ const (
 	DefaultMaxAttempts    = 10
 	DefaultTimeoutSeconds = 10
 	DefaultWorkerCount    = 8
-	DefaultPayloadDays    = 90
-	DefaultAttemptDays    = 90
+	// Circuit breaker defaults.
+	DefaultBreakerThreshold   = 5
+	DefaultBreakerCooldown    = 30 * time.Second
+	DefaultBreakerMaxCooldown = 10 * time.Minute
+	DefaultPayloadDays        = 90
+	DefaultAttemptDays        = 90
 )
 
 // DefaultRetrySchedule is the delay before each attempt (index 0 = first
@@ -262,9 +266,24 @@ type DeliveryConfig struct {
 	// application, otherwise half of it (rounded up).
 	MaxConcurrentPerApplication int        `yaml:"max_concurrent_per_application"`
 	RetrySchedule               []Duration `yaml:"retry_schedule"`
+	// CircuitBreaker pauses deliveries to an application whose endpoint
+	// keeps failing, so it does not tie up workers.
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"`
 	// AllowInsecureLocal permits http:// and loopback/private destinations.
 	// Development only.
 	AllowInsecureLocal bool `yaml:"allow_insecure_local"`
+}
+
+// CircuitBreakerConfig: after FailureThreshold consecutive attempts to an
+// application time out, fail to connect or get HTTP 5xx or 429, Relay
+// stops sending to it. Its deliveries wait, keeping their retry budget.
+// After Cooldown one probe delivery is sent: success resumes deliveries,
+// failure doubles the cooldown up to MaxCooldown.
+type CircuitBreakerConfig struct {
+	Disabled         bool     `yaml:"disabled"`
+	FailureThreshold int      `yaml:"failure_threshold"` // default 5
+	Cooldown         Duration `yaml:"cooldown"`          // default 30s
+	MaxCooldown      Duration `yaml:"max_cooldown"`      // default 10m
 }
 
 type RetentionConfig struct {
@@ -460,6 +479,17 @@ func (c *Config) applyDefaults() {
 	}
 	if len(d.RetrySchedule) == 0 {
 		d.RetrySchedule = append([]Duration(nil), DefaultRetrySchedule...)
+	}
+	if b := &d.CircuitBreaker; !b.Disabled {
+		if b.FailureThreshold == 0 {
+			b.FailureThreshold = DefaultBreakerThreshold
+		}
+		if b.Cooldown == 0 {
+			b.Cooldown = Duration(DefaultBreakerCooldown)
+		}
+		if b.MaxCooldown == 0 {
+			b.MaxCooldown = Duration(max(DefaultBreakerMaxCooldown, time.Duration(b.Cooldown)))
+		}
 	}
 	if c.Retention.PayloadDays == 0 {
 		c.Retention.PayloadDays = DefaultPayloadDays

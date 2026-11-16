@@ -237,6 +237,17 @@ func (c *Config) validate(extraProviders []string) []error {
 	if d.MaxConcurrentPerApplication < 1 || d.MaxConcurrentPerApplication > d.WorkerCount {
 		fail("delivery.max_concurrent_per_application: must be between 1 and worker_count (%d)", d.WorkerCount)
 	}
+	if b := d.CircuitBreaker; !b.Disabled {
+		if b.FailureThreshold < 1 || b.FailureThreshold > 100 {
+			fail("delivery.circuit_breaker.failure_threshold: must be between 1 and 100")
+		}
+		if b.Cooldown < Duration(time.Second) || b.Cooldown > Duration(time.Hour) {
+			fail("delivery.circuit_breaker.cooldown: must be between 1s and 1h")
+		}
+		if b.MaxCooldown < b.Cooldown || b.MaxCooldown > Duration(24*time.Hour) {
+			fail("delivery.circuit_breaker.max_cooldown: must be between cooldown and 24h")
+		}
+	}
 	for i, s := range d.RetrySchedule {
 		if s < 0 || time.Duration(s) > 7*24*time.Hour {
 			fail("delivery.retry_schedule[%d]: must be between 0s and 168h", i)
